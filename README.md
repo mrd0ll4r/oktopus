@@ -221,6 +221,7 @@ The layers are:
   We determine blocks to be file roots if they have UnixFS type `File` or `Raw` or are `raw` CIDs and
     1. appeared as a directory entry or
     2. were entered from the outside as a CID.
+  
   This generates entries in `successful_downloads` or `failed_downloads` with download type `"dag"`.
   This also inserts block-level information about all blocks in the file DAG.
 - Directory-level: `directory_entries`. The directory rooted in the given block has been downloaded.
@@ -228,7 +229,7 @@ The layers are:
   This generates entries in `successful_downloads` or `failed_downloads` with download type `"dag"`.
 
 For any block, at most one of (file,directory)-level information is present.
-Blocks which appear as sub-blocks in file DAGs are not indexed for block-level metadata, because they usually point to somewhere in the middle of a file.
+Blocks which appear as sub-blocks in file DAGs are not indexed for file-level metadata, because they usually point to somewhere in the middle of a file.
 This is overridden if any of the above two triggers for determining file roots are met.
 
 #### RabbitMQ
@@ -282,11 +283,9 @@ They log to stderr on info level by default, which can be overridden via `RUST_L
 ## TODO
 
 - Implement HAMTShard worker
-- Add something to docker compose that runs `ipfs repo gc` (via the API, probably) periodically
 - Add prometheus to the workers
 - Set up prometheus
 - Set up grafana, with provisioning
-- Configure IPFS nodes to not provide data via the DHT (this probably creates load on the nodes because they need to post provider records)
 - Refactor stuff to be nice
 
 ## License
