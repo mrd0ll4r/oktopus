@@ -1,0 +1,253 @@
+version: '3.8'
+services:
+  # A busybox container to easily launch a shell within the network.
+  shell:
+    image: "busybox:latest"
+
+  db:
+    image: "postgres:14"
+    command: postgres -c shared_buffers=512MB -c work_mem=16MB -c max_connections=200
+    restart: unless-stopped
+    # Healthcheck from https://stackoverflow.com/questions/46516584/docker-check-if-postgres-is-ready
+    healthcheck:
+      test: /usr/bin/pg_isready -U postgres
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init_db.sh:/docker-entrypoint-initdb.d/001_init_ipfs_db.sh
+    environment:
+      - POSTGRES_PASSWORD=coolipfsstuff321
+    ports:
+      # We probably don't want to expose our db to the internet, so localhost-only.
+      # This allows us to inspect the database from the host.
+      - "127.0.0.1:5433:5432"
+    shm_size: 512MB
+
+  redis:
+    image: "redis:7"
+    restart: unless-stopped
+    volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf
+
+  rabbitmq:
+    image: "rabbitmq:3.10"
+    restart: unless-stopped
+    hostname: rmq
+    # Healthcheck from https://devops.stackexchange.com/questions/12092/docker-compose-healthcheck-for-rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q status
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+      - rabbitmq_data:/var/lib/rabbitmq/mnesia/rabbit@rmq
+      - rabbitmq_logs:/var/log/rabbitmq/log
+    ports:
+      # Prometheus
+      - "127.0.0.1:8087:15692"
+      # AMQP, so we can post CIDs to RabbitMQ from the host.
+      # We probably don't want this exposed on the internet.
+      - "127.0.0.1:5672:5672"
+
+  cid_worker:
+    image: "ipfs-indexer-cid-worker:latest"
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+    volumes:
+      - ./.env:/ipfs-indexer/.env
+    environment:
+      - RUST_LOG=info
+    ports:
+      # Prometheus
+      - "127.0.0.1:8090:8088"
+
+  daemon01:
+    image: "ipfs/kubo:v0.15.0"
+    command: daemon --migrate=true --agent-version-suffix=docker --enable-gc
+    restart: unless-stopped
+    volumes:
+      - ipfs_01_path:/data/ipfs
+      - ./001_configure_ipfs.sh:/container-init.d/001_configure_ipfs.sh
+    environment:
+      - IPFS_PATH=/data/ipfs
+    ports:
+      # Swarm listens on all interfaces, so is remotely reachable.
+      - "4001:4001/tcp"
+      - "4001:4001/udp"
+      # API port, which includes admin operations, so you probably don't want this remotely accessible.
+      - "127.0.0.1:5001:5001"
+      # HTTP Gateway
+      - "127.0.0.1:8081:8080"
+
+  daemon02:
+    image: "ipfs/kubo:v0.15.0"
+    command: daemon --migrate=true --agent-version-suffix=docker --enable-gc
+    restart: unless-stopped
+    volumes:
+      - ipfs_02_path:/data/ipfs
+      - ./001_configure_ipfs.sh:/container-init.d/001_configure_ipfs.sh
+    environment:
+      - IPFS_PATH=/data/ipfs
+    ports:
+      # Swarm listens on all interfaces, so is remotely reachable.
+      - "4002:4001/tcp"
+      - "4002:4001/udp"
+      # API port, which includes admin operations, so you probably don't want this remotely accessible.
+      - "127.0.0.1:5002:5001"
+      # HTTP Gateway
+      - "127.0.0.1:8082:8080"
+
+  block_worker_daemon01:
+    image: "ipfs-indexer-block-worker:latest"
+    command:
+      - "--daemon"
+      - "http://daemon01:5001"
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+      daemon01:
+        condition: service_healthy
+    volumes:
+      - ./.env:/ipfs-indexer/.env
+    environment:
+      - RUST_LOG=info
+    ports:
+      # Prometheus
+      - "127.0.0.1:8091:8088"
+
+  block_worker_daemon02:
+    image: "ipfs-indexer-block-worker:latest"
+    command:
+      - "--daemon"
+      - "http://daemon02:5001"
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+      daemon02:
+        condition: service_healthy
+    volumes:
+      - ./.env:/ipfs-indexer/.env
+    environment:
+      - RUST_LOG=info
+    ports:
+      # Prometheus
+      - "127.0.0.1:8092:8088"
+        
+  directory_worker_daemon01:
+    image: "ipfs-indexer-directory-worker:latest"
+    command:
+      - "--daemon"
+      - "http://daemon01:5001"
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+      daemon01:
+        condition: service_healthy
+    volumes:
+      - ./.env:/ipfs-indexer/.env
+    environment:
+      - RUST_LOG=info
+    ports:
+      # Prometheus
+      - "127.0.0.1:8071:8088"
+
+  directory_worker_daemon02:
+    image: "ipfs-indexer-directory-worker:latest"
+    command:
+      - "--daemon"
+      - "http://daemon02:5001"
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+      daemon02:
+        condition: service_healthy
+    volumes:
+      - ./.env:/ipfs-indexer/.env
+    environment:
+      - RUST_LOG=info
+    ports:
+      # Prometheus
+      - "127.0.0.1:8072:8088"
+        
+  file_worker_daemon01:
+    image: "ipfs-indexer-file-worker:latest"
+    command:
+      - "--daemon"
+      - "http://daemon01:5001"
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+      daemon01:
+        condition: service_healthy
+    volumes:
+      - ./.env:/ipfs-indexer/.env
+    environment:
+      - RUST_LOG=info
+    ports:
+      # Prometheus
+      - "127.0.0.1:8061:8088"
+
+  file_worker_daemon02:
+    image: "ipfs-indexer-file-worker:latest"
+    command:
+      - "--daemon"
+      - "http://daemon02:5001"
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+      daemon02:
+        condition: service_healthy
+    volumes:
+      - ./.env:/ipfs-indexer/.env
+    environment:
+      - RUST_LOG=info
+    ports:
+      # Prometheus
+      - "127.0.0.1:8062:8088"
+
+
+volumes:
+  ipfs_01_path:
+  ipfs_02_path:
+  pg_data:
+  rabbitmq_data:
+  rabbitmq_logs:
