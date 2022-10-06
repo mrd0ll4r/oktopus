@@ -1,0 +1,12 @@
+# source: https://github.com/rabbitmq/rabbitmq-server/blob/main/deps/rabbitmq_prometheus/docker/grafana/dashboards.yml
+
+apiVersion: 1
+
+providers:
+  - name: 'rabbitmq'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: true
+    options:
+      path: /dashboards

@@ -4,6 +4,66 @@ services:
   shell:
     image: "busybox:latest"
 
+  basic_depends_dummy:
+    profiles:
+      - "no_run"
+    image: "busybox:latest"
+    depends_on: &basic_depends
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+
+  daemon01_depends_dummy:
+    profiles:
+      - "no_run"
+    image: "busybox:latest"
+    depends_on: &daemon_01_depends
+      <<: *basic_depends
+      daemon01:
+        condition: service_healthy
+  
+  daemon02_depends_dummy:
+    profiles:
+      - "no_run"
+    image: "busybox:latest"
+    depends_on: &daemon_02_depends
+      <<: *basic_depends
+      daemon02:
+        condition: service_healthy
+
+  basic_worker_dummy: &basic_worker
+    profiles:
+      - "no_run"
+    image: "busybox:latest"
+    restart: unless-stopped
+    expose:
+      - 8088
+    depends_on:
+      <<: *basic_depends
+    volumes:
+      - ./.env:/ipfs-indexer/.env
+    environment:
+      - RUST_LOG=info
+
+  daemon01_worker_dummy: &daemon01_worker
+    <<: *basic_worker
+    command:
+      - "--daemon"
+      - "http://daemon01:5001"
+    depends_on:
+      <<: *daemon_01_depends
+
+  daemon02_worker_dummy: &daemon02_worker
+    <<: *basic_worker
+    command:
+      - "--daemon"
+      - "http://daemon02:5001"
+    depends_on:
+      <<: *daemon_02_depends
+
   db:
     image: "postgres:14"
     command: postgres -c shared_buffers=512MB -c work_mem=16MB -c max_connections=200
@@ -35,6 +95,8 @@ services:
     image: "rabbitmq:3.10"
     restart: unless-stopped
     hostname: rmq
+    expose:
+      - 15692
     # Healthcheck from https://devops.stackexchange.com/questions/12092/docker-compose-healthcheck-for-rabbitmq
     healthcheck:
       test: rabbitmq-diagnostics -q status
@@ -46,31 +108,16 @@ services:
       - rabbitmq_data:/var/lib/rabbitmq/mnesia/rabbit@rmq
       - rabbitmq_logs:/var/log/rabbitmq/log
     ports:
-      # Prometheus
-      - "127.0.0.1:8087:15692"
       # AMQP, so we can post CIDs to RabbitMQ from the host.
       # We probably don't want this exposed on the internet.
       - "127.0.0.1:5672:5672"
 
   cid_worker:
+    <<: *basic_worker
+    profiles: []
     image: "ipfs-indexer-cid-worker:latest"
-    restart: unless-stopped
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      db:
-        condition: service_healthy
-    volumes:
-      - ./.env:/ipfs-indexer/.env
-    environment:
-      - RUST_LOG=info
-    ports:
-      # Prometheus
-      - "127.0.0.1:8090:8088"
 
-  daemon01:
+  daemon01: &daemon
     image: "ipfs/kubo:v0.15.0"
     command: daemon --migrate=true --agent-version-suffix=docker --enable-gc
     restart: unless-stopped
@@ -85,167 +132,108 @@ services:
       - "4001:4001/udp"
       # API port, which includes admin operations, so you probably don't want this remotely accessible.
       - "127.0.0.1:5001:5001"
-      # HTTP Gateway
-      - "127.0.0.1:8081:8080"
 
   daemon02:
-    image: "ipfs/kubo:v0.15.0"
-    command: daemon --migrate=true --agent-version-suffix=docker --enable-gc
-    restart: unless-stopped
+    <<: *daemon
     volumes:
       - ipfs_02_path:/data/ipfs
-      - ./001_configure_ipfs.sh:/container-init.d/001_configure_ipfs.sh
-    environment:
-      - IPFS_PATH=/data/ipfs
     ports:
       # Swarm listens on all interfaces, so is remotely reachable.
       - "4002:4001/tcp"
       - "4002:4001/udp"
       # API port, which includes admin operations, so you probably don't want this remotely accessible.
       - "127.0.0.1:5002:5001"
-      # HTTP Gateway
-      - "127.0.0.1:8082:8080"
 
   block_worker_daemon01:
+    <<: *daemon01_worker
+    profiles: []
     image: "ipfs-indexer-block-worker:latest"
-    command:
-      - "--daemon"
-      - "http://daemon01:5001"
-    restart: unless-stopped
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      db:
-        condition: service_healthy
-      daemon01:
-        condition: service_healthy
-    volumes:
-      - ./.env:/ipfs-indexer/.env
-    environment:
-      - RUST_LOG=info
-    ports:
-      # Prometheus
-      - "127.0.0.1:8091:8088"
 
   block_worker_daemon02:
+    <<: *daemon02_worker
+    profiles: []
     image: "ipfs-indexer-block-worker:latest"
-    command:
-      - "--daemon"
-      - "http://daemon02:5001"
-    restart: unless-stopped
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      db:
-        condition: service_healthy
-      daemon02:
-        condition: service_healthy
-    volumes:
-      - ./.env:/ipfs-indexer/.env
-    environment:
-      - RUST_LOG=info
-    ports:
-      # Prometheus
-      - "127.0.0.1:8092:8088"
-        
+
   directory_worker_daemon01:
+    <<: *daemon01_worker
+    profiles: []
     image: "ipfs-indexer-directory-worker:latest"
-    command:
-      - "--daemon"
-      - "http://daemon01:5001"
-    restart: unless-stopped
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      db:
-        condition: service_healthy
-      daemon01:
-        condition: service_healthy
-    volumes:
-      - ./.env:/ipfs-indexer/.env
-    environment:
-      - RUST_LOG=info
-    ports:
-      # Prometheus
-      - "127.0.0.1:8071:8088"
 
   directory_worker_daemon02:
+    <<: *daemon02_worker
+    profiles: []
     image: "ipfs-indexer-directory-worker:latest"
-    command:
-      - "--daemon"
-      - "http://daemon02:5001"
-    restart: unless-stopped
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      db:
-        condition: service_healthy
-      daemon02:
-        condition: service_healthy
-    volumes:
-      - ./.env:/ipfs-indexer/.env
-    environment:
-      - RUST_LOG=info
-    ports:
-      # Prometheus
-      - "127.0.0.1:8072:8088"
-        
+
   file_worker_daemon01:
+    <<: *daemon01_worker
+    profiles: []
     image: "ipfs-indexer-file-worker:latest"
-    command:
-      - "--daemon"
-      - "http://daemon01:5001"
-    restart: unless-stopped
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      db:
-        condition: service_healthy
-      daemon01:
-        condition: service_healthy
-    volumes:
-      - ./.env:/ipfs-indexer/.env
-    environment:
-      - RUST_LOG=info
-    ports:
-      # Prometheus
-      - "127.0.0.1:8061:8088"
+    oom_kill_disable: true
 
   file_worker_daemon02:
+    <<: *daemon02_worker
+    profiles: []
     image: "ipfs-indexer-file-worker:latest"
-    command:
-      - "--daemon"
-      - "http://daemon02:5001"
-    restart: unless-stopped
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      db:
-        condition: service_healthy
-      daemon02:
-        condition: service_healthy
-    volumes:
-      - ./.env:/ipfs-indexer/.env
-    environment:
-      - RUST_LOG=info
-    ports:
-      # Prometheus
-      - "127.0.0.1:8062:8088"
+    oom_kill_disable: true
 
+  grafana:
+    # https://hub.docker.com/r/grafana/grafana/tags
+    image: grafana/grafana:8.3.4
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/rabbitmq.yaml
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/prometheus.yaml
+      - ./grafana/dashboards:/dashboards
+    environment:
+      # https://grafana.com/plugins/flant-statusmap-panel
+      # https://grafana.com/plugins/grafana-piechart-panel
+      # https://grafana.com/plugins/grafana-polystat-panel
+      # https://grafana.com/plugins/jdbranham-diagram-panel
+      # https://grafana.com/plugins/michaeldmoore-multistat-panel
+      # https://grafana.com/plugins/vonage-status-panel
+      # https://grafana.com/plugins/yesoreyeram-boomtable-panel
+      GF_INSTALL_PLUGINS: "flant-statusmap-panel,grafana-piechart-panel"
+  prometheus:
+    # https://hub.docker.com/r/prom/prometheus/tags
+    image: prom/prometheus:v2.39.0
+    expose:
+      - 9090
+    #ports:
+    #  - "127.0.0.1:9090:9090"
+    volumes:
+      - prometheus_data:/prometheus
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+  node-exporter:
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+    expose:
+      - 9100
+    # https://hub.docker.com/r/prom/node-exporter/tags
+    image: prom/node-exporter:v1.4.0
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+  cadvisor:
+    expose:
+      - 8080
+    # https://hub.docker.com/r/google/cadvisor/tags
+    image: google/cadvisor:v0.33.0
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /cgroup:/cgroup:ro #doesn't work on MacOS only for Linux
 
 volumes:
+  prometheus_data:
+  grafana_data:
   ipfs_01_path:
   ipfs_02_path:
   pg_data:
