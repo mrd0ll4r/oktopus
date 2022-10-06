@@ -12,6 +12,12 @@ pub async fn query_ipfs_for_file_data<T>(c: &str, client: Arc<T>) -> anyhow::Res
 where
     T: IpfsApi + Sync,
 {
+    debug!("calling ipfs cat for CID {}", c);
+
+    let _timer = crate::prom::IPFS_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["cat"])
+        .unwrap()
+        .start_timer();
     client
         .cat(c)
         .map_ok(|chunk| chunk.to_vec())
@@ -53,6 +59,10 @@ where
             .context("unable to get directory listing")?
     };
     let elapsed = ts_before.elapsed();
+    crate::prom::IPFS_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&[if full { "ls_full" } else { "ls_fast" }])
+        .unwrap()
+        .observe(elapsed.as_secs_f64());
 
     res.into_iter()
         .flat_map(|entry| entry.links.into_iter())
@@ -154,6 +164,10 @@ where
         "{}: block stat took {:?}, block size: {}",
         cid, dur_block_stat, block_stat_resp.size
     );
+    crate::prom::IPFS_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["block_stat"])
+        .unwrap()
+        .observe(dur_block_stat.as_secs_f64());
 
     if codec == crate::CODEC_RAW {
         // raw blocks have no links or extra data
@@ -177,6 +191,10 @@ where
         dur_object_get,
         object_get_resp.links.len()
     );
+    crate::prom::IPFS_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["object_get"])
+        .unwrap()
+        .observe(dur_object_get.as_secs_f64());
 
     debug!("{}: object data", cid);
     let ts_before = Instant::now();
@@ -194,6 +212,10 @@ where
         dur_object_data,
         object_data_resp.len()
     );
+    crate::prom::IPFS_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["object_data"])
+        .unwrap()
+        .observe(dur_object_data.as_secs_f64());
 
     debug!("{}: decoding protobuf", cid);
     let unixfs_block =

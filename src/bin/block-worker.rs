@@ -1,16 +1,19 @@
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use clap::{arg, Command};
 use diesel::PgConnection;
 use futures_util::StreamExt;
 use ipfs_api_backend_hyper::{IpfsApi, TryFromUri};
+use ipfs_indexer::prom::OutcomeLabel;
 use ipfs_indexer::queue::{BlockMessage, DirectoryMessage, FileMessage, HamtShardMessage};
 use ipfs_indexer::redis::RedisConnection;
-use ipfs_indexer::{db, ipfs, logging, models, queue, redis, IpfsApiClient};
+use ipfs_indexer::{
+    db, ipfs, logging, models, prom, queue, redis, IpfsApiClient, WorkerConnections,
+};
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
 use log::{debug, error, info, warn};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -49,41 +52,17 @@ Static configuration is taken from a .env file, see the README for more informat
         "connected to IPFS daemon version {} at {} with ID {:?}",
         daemon_id.agent_version, daemon_uri, daemon_id.id
     );
+    let daemon_uri = Arc::new(daemon_uri.clone());
 
-    debug!("connecting to database...");
-    let mut conn = ipfs_indexer::establish_connection().context("unable to connect to DB")?;
-    info!("connected to database");
-
-    debug!("running pending migrations...");
-    let migrations = ipfs_indexer::run_pending_migrations(&mut conn)
-        .map_err(|e| anyhow!("{}", e))
-        .context("unable to run migrations")?;
-    info!("ran migrations {:?}", migrations);
-
-    let db_conn = Arc::new(Mutex::new(conn));
-
-    debug!("connecting to redis...");
-    let redis_conn = redis::connect_env()
+    debug!("setting up worker connections");
+    let WorkerConnections {
+        db_conn,
+        redis_conn,
+        rabbitmq_conn,
+    } = ipfs_indexer::worker_setup()
         .await
-        .context("unable to connect to redis")?;
-    info!("connected to redis");
+        .context("unable to set up connections")?;
 
-    debug!("connecting to RabbitMQ...");
-    let rabbitmq_conn = queue::connect_env()
-        .await
-        .context("unable to connect to RabbitMQ")?;
-    info!("connected to RabbitMQ");
-
-    debug!("setting up RabbitMQ queues...");
-    {
-        let chan = rabbitmq_conn
-            .create_channel()
-            .await
-            .context("unable to create RabbitMQ channel")?;
-        queue::Queues::set_up_queues(&chan)
-            .await
-            .context("unable to create RabbitMQ queues")?;
-    }
     debug!("creating channels and setting prefetch...");
     let blocks_chan = rabbitmq_conn
         .create_channel()
@@ -120,19 +99,14 @@ Static configuration is taken from a .env file, see the README for more informat
         .subscribe(&blocks_chan, &format!("blocks_worker_{}", daemon_id.id))
         .await
         .context("unable to subscribe to blocks queue")?;
-    info!("set up RabbitMQ queues");
-
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
+    info!("set up RabbitMQ consumer and channels");
 
     info!("listening for tasks");
     while let Some(delivery) = blocks_consumer.next().await {
         let delivery = delivery.expect("error in consumer");
         debug!("got delivery {:?}", delivery);
 
+        let daemon_uri = daemon_uri.clone();
         let redis_conn = redis_conn.clone();
         let files_chan = files_chan.clone();
         let directories_chan = directories_chan.clone();
@@ -143,6 +117,7 @@ Static configuration is taken from a .env file, see the README for more informat
         tokio::spawn(async move {
             handle_delivery(
                 delivery,
+                daemon_uri,
                 redis_conn,
                 files_chan,
                 directories_chan,
@@ -160,6 +135,7 @@ Static configuration is taken from a .env file, see the README for more informat
 
 async fn handle_delivery<T>(
     delivery: Delivery,
+    daemon_uri: Arc<String>,
     mut redis_conn: RedisConnection,
     files_chan: Arc<lapin::Channel>,
     directories_chan: Arc<lapin::Channel>,
@@ -179,6 +155,7 @@ async fn handle_delivery<T>(
         }
     };
 
+    let before = Instant::now();
     match handle_block(
         msg,
         &mut redis_conn,
@@ -192,14 +169,30 @@ async fn handle_delivery<T>(
     .await
     {
         Ok(outcome) => {
-            // TODO prometheus
+            // Record in prometheus
+            prom::record_task_duration(
+                &*prom::BLOCK_TASK_STATUS,
+                outcome,
+                before.elapsed(),
+                &daemon_uri,
+            );
+
+            // Report to RabbitMQ
             acker
                 .ack(BasicAckOptions::default())
                 .await
                 .expect("unable to ACK delivery");
         }
         Err(outcome) => {
-            // TODO prometheus
+            // Record in prometheus
+            prom::record_task_duration(
+                &*prom::BLOCK_TASK_STATUS,
+                outcome,
+                before.elapsed(),
+                &daemon_uri,
+            );
+
+            // Report to RabbitMQ
             acker
                 .nack(BasicNackOptions {
                     requeue: true,
@@ -211,7 +204,7 @@ async fn handle_delivery<T>(
     }
 }
 
-enum PositiveOutcome {
+enum Success {
     RedisCached,
     RedisFailureCached,
     DbFailureThreshold,
@@ -220,12 +213,45 @@ enum PositiveOutcome {
     Done,
 }
 
-enum ErrorOutcome {
+impl OutcomeLabel for Success {
+    fn success(&self) -> bool {
+        true
+    }
+
+    fn reason(&self) -> &'static str {
+        match self {
+            Success::RedisCached => "redis_cached",
+            Success::RedisFailureCached => "redis_failure_cached",
+            Success::DbFailureThreshold => "db_failure_threshold",
+            Success::SkippedUnixFsSymlinkOrMetadata => "skipped_unixfs_symlink_or_metadata",
+            Success::UnableToParseReferencedCids => "unable_to_parse_referenced_cids",
+            Success::Done => "done",
+        }
+    }
+}
+
+enum Failure {
     DbSelectFailed,
     DownloadFailed,
     DbUpsertFailed,
     DbFailureInsertFailed,
     FailedToPostTask,
+}
+
+impl OutcomeLabel for Failure {
+    fn success(&self) -> bool {
+        false
+    }
+
+    fn reason(&self) -> &'static str {
+        match self {
+            Failure::DbSelectFailed => "db_select_failed",
+            Failure::DownloadFailed => "download_failed",
+            Failure::DbUpsertFailed => "db_upsert_failed",
+            Failure::DbFailureInsertFailed => "db_insert_failed",
+            Failure::FailedToPostTask => "failed_to_post_task",
+        }
+    }
 }
 
 async fn handle_block<T>(
@@ -237,7 +263,7 @@ async fn handle_block<T>(
     db_conn: Arc<Mutex<PgConnection>>,
     ipfs_client: Arc<T>,
     failure_threshold: u64,
-) -> Result<PositiveOutcome, ErrorOutcome>
+) -> Result<Success, Failure>
 where
     T: IpfsApi + Sync,
 {
@@ -267,7 +293,7 @@ where
             if done {
                 // Refresh redis
                 redis_mark_done(&cid, redis_conn).await;
-                return Ok(PositiveOutcome::RedisCached);
+                return Ok(Success::RedisCached);
             }
         }
         Err(err) => {
@@ -284,7 +310,7 @@ where
                 if failures >= failure_threshold {
                     debug!("{}: too many failures, skipping", cid);
                     redis_mark_done(&cid, redis_conn).await;
-                    return Ok(PositiveOutcome::RedisFailureCached);
+                    return Ok(Success::RedisFailureCached);
                 }
             }
         }
@@ -302,13 +328,13 @@ where
                 if failures.len() as u64 >= failure_threshold {
                     debug!("{}: too many failures, skipping", cid);
                     redis_mark_done(&cid, redis_conn).await;
-                    return Ok(PositiveOutcome::DbFailureThreshold);
+                    return Ok(Success::DbFailureThreshold);
                 }
             }
         }
         Err(err) => {
             error!("unable to check block failures in database: {:?}", err);
-            return Err(ErrorOutcome::DbSelectFailed);
+            return Err(Failure::DbSelectFailed);
         }
     }
 
@@ -318,7 +344,7 @@ where
         Ok(res) => res,
         Err(err) => {
             error!("unable to check block status in database: {:?}", err);
-            return Err(ErrorOutcome::DbSelectFailed);
+            return Err(Failure::DbSelectFailed);
         }
     };
 
@@ -341,7 +367,7 @@ where
                             Err(_) => {
                                 // Parsing the referenced CID failed.
                                 // TODO record this as a failure? Probably not.
-                                return Ok(PositiveOutcome::UnableToParseReferencedCids);
+                                return Ok(Success::UnableToParseReferencedCids);
                             }
                         }
                     }
@@ -363,13 +389,13 @@ where
                                     "unable to insert download failure into database: {:?}",
                                     err
                                 );
-                                return Err(ErrorOutcome::DbFailureInsertFailed);
+                                return Err(Failure::DbFailureInsertFailed);
                             }
                         }
 
                         redis_mark_failed(&cid, redis_conn).await;
 
-                        return Err(ErrorOutcome::DownloadFailed);
+                        return Err(Failure::DownloadFailed);
                     }
                 };
             debug!("{}: got metadata {:?}", cid, block_level_metadata);
@@ -388,7 +414,7 @@ where
                 Ok(res) => res,
                 Err(err) => {
                     error!("unable to upsert block metadata into database: {:?}", err);
-                    return Err(ErrorOutcome::DbUpsertFailed);
+                    return Err(Failure::DbUpsertFailed);
                 }
             };
             debug!(
@@ -409,7 +435,7 @@ where
         models::UNIXFS_TYPE_METADATA_ID | models::UNIXFS_TYPE_SYMLINK_ID => {
             debug!("{}: skipping UnixFS metadata or symlink", cid);
             redis_mark_done(&cid, redis_conn).await;
-            return Ok(PositiveOutcome::SkippedUnixFsSymlinkOrMetadata);
+            return Ok(Success::SkippedUnixFsSymlinkOrMetadata);
         }
         models::UNIXFS_TYPE_FILE_ID | models::UNIXFS_TYPE_RAW_ID => {
             debug!("{}: posting file task", cid);
@@ -455,7 +481,7 @@ where
         }
         Err(err) => {
             error!("unable to post task: {:?}", err);
-            return Err(ErrorOutcome::FailedToPostTask);
+            return Err(Failure::FailedToPostTask);
         }
     }
 
@@ -463,7 +489,7 @@ where
     debug!("{}: marking done in redis...", cid);
     redis_mark_done(&cid, redis_conn).await;
 
-    Ok(PositiveOutcome::Done)
+    Ok(Success::Done)
 }
 
 async fn redis_mark_failed(cid: &str, redis_conn: &mut RedisConnection) {
@@ -478,21 +504,5 @@ async fn redis_mark_failed(cid: &str, redis_conn: &mut RedisConnection) {
 }
 
 async fn redis_mark_done(cid: &str, redis_conn: &mut RedisConnection) {
-    match redis::Cache::Cids.mark_done(cid, redis_conn).await {
-        Ok(_) => {
-            debug!("{}: marked done in redis cids", cid);
-        }
-        Err(err) => {
-            warn!("unable to update redis CIDs cache: {:?}", err)
-        }
-    }
-
-    match redis::Cache::Blocks.mark_done(cid, redis_conn).await {
-        Ok(_) => {
-            debug!("{}: marked done in redis blocks", cid);
-        }
-        Err(err) => {
-            warn!("unable to update redis blocks cache: {:?}", err)
-        }
-    }
+    redis::mark_done_up_to_logging(cid, redis_conn, redis::Cache::Blocks).await;
 }

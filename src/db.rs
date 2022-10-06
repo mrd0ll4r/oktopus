@@ -12,19 +12,6 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::task::JoinError;
 
-#[derive(Clone, Debug)]
-pub enum BlockStatus {
-    Missing,
-    /// The block is present but not indexed.
-    Block(Block),
-    /// The block and CID are present but not indexed.
-    Cid(Cid, Block),
-    /// The block is present and indexed, CID is missing.
-    BlockComplete(Block, BlockStat),
-    /// Block and CID are present and indexed.
-    Complete(Cid, Block, BlockStat),
-}
-
 #[derive(Error, Debug)]
 pub enum AsyncDBError {
     #[error("database returned error")]
@@ -42,14 +29,19 @@ pub async fn async_upsert_successful_block(
     links: Vec<(String, i64, CIDParts)>,
     ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(BlockStat, Vec<BlockLink>), AsyncDBError> {
-    let res = tokio::task::spawn_blocking(move || {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["upsert_successful_block"])
+        .unwrap()
+        .start_timer();
+
+    tokio::task::spawn_blocking(move || {
         let mut conn = conn.lock().unwrap();
 
         upsert_successful_block(&mut conn, p_block_id, block_size, unixfs_type_id, links, ts)
     })
     .await
-    .map_err(AsyncDBError::Runtime)?;
-    res.map_err(AsyncDBError::Database)
+    .map_err(AsyncDBError::Runtime)?
+    .map_err(AsyncDBError::Database)
 }
 
 pub async fn async_upsert_successful_directory(
@@ -58,14 +50,19 @@ pub async fn async_upsert_successful_directory(
     entries: Vec<(String, i64, CIDParts, BlockLevelMetadata)>,
     ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<(DirectoryEntry, Cid, Block, BlockStat, Vec<BlockLink>)>, AsyncDBError> {
-    let res = tokio::task::spawn_blocking(move || {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["upsert_successful_directory"])
+        .unwrap()
+        .start_timer();
+
+    tokio::task::spawn_blocking(move || {
         let mut conn = conn.lock().unwrap();
 
         upsert_successful_directory(&mut conn, p_block_id, entries, ts)
     })
     .await
-    .map_err(AsyncDBError::Runtime)?;
-    res.map_err(AsyncDBError::Database)
+    .map_err(AsyncDBError::Runtime)?
+    .map_err(AsyncDBError::Database)
 }
 
 pub async fn async_upsert_successful_file(
@@ -78,6 +75,11 @@ pub async fn async_upsert_successful_file(
     dag: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
     ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), AsyncDBError> {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["upsert_successful_file"])
+        .unwrap()
+        .start_timer();
+
     tokio::task::spawn_blocking(move || {
         let mut conn = conn.lock().unwrap();
         let mut cache = mime_cache.lock().unwrap();
@@ -96,6 +98,128 @@ pub async fn async_upsert_successful_file(
     .await
     .map_err(AsyncDBError::Runtime)?
     .map_err(AsyncDBError::Database)
+}
+
+pub async fn async_insert_block_download_failure(
+    conn: Arc<Mutex<PgConnection>>,
+    block_id: i64,
+    ts: chrono::DateTime<chrono::Utc>,
+) -> Result<(), AsyncDBError> {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["insert_block_download_failure"])
+        .unwrap()
+        .start_timer();
+
+    async_insert_download_failure_idempotent(conn, block_id, DOWNLOAD_TYPE_BLOCK_ID, ts).await
+}
+
+pub async fn async_insert_dag_download_failure(
+    conn: Arc<Mutex<PgConnection>>,
+    block_id: i64,
+    ts: chrono::DateTime<chrono::Utc>,
+) -> Result<(), AsyncDBError> {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["insert_dag_download_failure"])
+        .unwrap()
+        .start_timer();
+
+    async_insert_download_failure_idempotent(conn, block_id, DOWNLOAD_TYPE_DAG_ID, ts).await
+}
+
+pub async fn async_upsert_block_and_cid(
+    conn: Arc<Mutex<PgConnection>>,
+    cid: CIDParts,
+) -> Result<(Block, Cid), AsyncDBError> {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["upsert_block_and_cid"])
+        .unwrap()
+        .start_timer();
+
+    tokio::task::spawn_blocking(move || {
+        let mut conn = conn.lock().unwrap();
+        upsert_block_and_cid(&mut conn, cid)
+    })
+    .await
+    .map_err(AsyncDBError::Runtime)?
+    .map_err(AsyncDBError::Database)
+}
+
+pub async fn async_get_directory_listing(
+    conn: Arc<Mutex<PgConnection>>,
+    p_block_id: i64,
+) -> Result<Option<Vec<(DirectoryEntry, Cid, Block, BlockStat, Vec<BlockLink>)>>, AsyncDBError> {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["get_directory_listing"])
+        .unwrap()
+        .start_timer();
+
+    tokio::task::spawn_blocking(move || {
+        let mut conn = conn.lock().unwrap();
+        get_directory_listing(&mut conn, p_block_id)
+    })
+    .await
+    .map_err(AsyncDBError::Runtime)?
+    .map_err(AsyncDBError::Database)
+}
+
+pub async fn async_get_file_heuristics(
+    conn: Arc<Mutex<PgConnection>>,
+    block_id: i64,
+) -> Result<Option<BlockFileMimeType>, AsyncDBError> {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["get_file_heuristics"])
+        .unwrap()
+        .start_timer();
+
+    tokio::task::spawn_blocking(move || {
+        let mut conn = conn.lock().unwrap();
+        get_file_heuristics(&mut conn, block_id)
+    })
+    .await
+    .map_err(AsyncDBError::Runtime)?
+    .map_err(AsyncDBError::Database)
+}
+
+pub async fn async_get_block_stats(
+    conn: Arc<Mutex<PgConnection>>,
+    block_id: i64,
+) -> Result<Option<(BlockStat, Vec<BlockLink>)>, AsyncDBError> {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["get_block_stats"])
+        .unwrap()
+        .start_timer();
+
+    tokio::task::spawn_blocking(move || {
+        let mut conn = conn.lock().unwrap();
+        get_block_stats(&mut conn, block_id)
+    })
+    .await
+    .map_err(AsyncDBError::Runtime)?
+    .map_err(AsyncDBError::Database)
+}
+
+pub async fn async_get_failed_block_downloads(
+    conn: Arc<Mutex<PgConnection>>,
+    block_id: i64,
+) -> Result<Option<Vec<FailedDownload>>, AsyncDBError> {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["get_failed_block_downloads"])
+        .unwrap()
+        .start_timer();
+
+    async_get_failed_downloads(conn, block_id, DOWNLOAD_TYPE_BLOCK_ID).await
+}
+
+pub async fn async_get_failed_dag_downloads(
+    conn: Arc<Mutex<PgConnection>>,
+    block_id: i64,
+) -> Result<Option<Vec<FailedDownload>>, AsyncDBError> {
+    let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["get_failed_dag_downloads"])
+        .unwrap()
+        .start_timer();
+
+    async_get_failed_downloads(conn, block_id, DOWNLOAD_TYPE_DAG_ID).await
 }
 
 pub fn upsert_successful_file(
@@ -491,22 +615,6 @@ pub fn insert_download_success_idempotent(
     Ok(())
 }
 
-pub async fn async_insert_block_download_failure(
-    conn: Arc<Mutex<PgConnection>>,
-    block_id: i64,
-    ts: chrono::DateTime<chrono::Utc>,
-) -> Result<(), AsyncDBError> {
-    async_insert_download_failure_idempotent(conn, block_id, DOWNLOAD_TYPE_BLOCK_ID, ts).await
-}
-
-pub async fn async_insert_dag_download_failure(
-    conn: Arc<Mutex<PgConnection>>,
-    block_id: i64,
-    ts: chrono::DateTime<chrono::Utc>,
-) -> Result<(), AsyncDBError> {
-    async_insert_download_failure_idempotent(conn, block_id, DOWNLOAD_TYPE_DAG_ID, ts).await
-}
-
 async fn async_insert_download_failure_idempotent(
     conn: Arc<Mutex<PgConnection>>,
     block_id: i64,
@@ -549,19 +657,6 @@ pub fn insert_download_failure_idempotent(
         .execute(conn)?;
 
     Ok(())
-}
-
-pub async fn async_upsert_block_and_cid(
-    conn: Arc<Mutex<PgConnection>>,
-    cid: CIDParts,
-) -> Result<(Block, Cid), AsyncDBError> {
-    let res = tokio::task::spawn_blocking(move || {
-        let mut conn = conn.lock().unwrap();
-        upsert_block_and_cid(&mut conn, cid)
-    })
-    .await
-    .map_err(AsyncDBError::Runtime)?;
-    res.map_err(AsyncDBError::Database)
 }
 
 pub fn upsert_block_and_cid(
@@ -610,19 +705,6 @@ pub fn upsert_block_and_cid(
     debug!("upserted CID {:?}", upserted_cid);
 
     Ok((upserted_block, upserted_cid))
-}
-
-pub async fn async_get_directory_listing(
-    conn: Arc<Mutex<PgConnection>>,
-    p_block_id: i64,
-) -> Result<Option<Vec<(DirectoryEntry, Cid, Block, BlockStat, Vec<BlockLink>)>>, AsyncDBError> {
-    let res = tokio::task::spawn_blocking(move || {
-        let mut conn = conn.lock().unwrap();
-        get_directory_listing(&mut conn, p_block_id)
-    })
-    .await
-    .map_err(AsyncDBError::Runtime)?;
-    res.map_err(AsyncDBError::Database)
 }
 
 pub fn get_directory_listing(
@@ -748,19 +830,6 @@ pub fn get_directory_listing(
     Ok(Some(entries))
 }
 
-pub async fn async_get_file_heuristics(
-    conn: Arc<Mutex<PgConnection>>,
-    block_id: i64,
-) -> Result<Option<BlockFileMimeType>, AsyncDBError> {
-    tokio::task::spawn_blocking(move || {
-        let mut conn = conn.lock().unwrap();
-        get_file_heuristics(&mut conn, block_id)
-    })
-    .await
-    .map_err(AsyncDBError::Runtime)?
-    .map_err(AsyncDBError::Database)
-}
-
 pub fn get_file_heuristics(
     conn: &mut PgConnection,
     p_block_id: i64,
@@ -776,19 +845,6 @@ pub fn get_file_heuristics(
             res
         })
         .optional()
-}
-
-pub async fn async_get_block_stats(
-    conn: Arc<Mutex<PgConnection>>,
-    block_id: i64,
-) -> Result<Option<(BlockStat, Vec<BlockLink>)>, AsyncDBError> {
-    let res = tokio::task::spawn_blocking(move || {
-        let mut conn = conn.lock().unwrap();
-        get_block_stats(&mut conn, block_id)
-    })
-    .await
-    .map_err(AsyncDBError::Runtime)?;
-    res.map_err(AsyncDBError::Database)
 }
 
 pub fn get_block_stats(
@@ -831,20 +887,6 @@ pub fn get_block_stats(
             }
         }
     }
-}
-
-pub async fn async_get_failed_block_downloads(
-    conn: Arc<Mutex<PgConnection>>,
-    block_id: i64,
-) -> Result<Option<Vec<FailedDownload>>, AsyncDBError> {
-    async_get_failed_downloads(conn, block_id, DOWNLOAD_TYPE_BLOCK_ID).await
-}
-
-pub async fn async_get_failed_dag_downloads(
-    conn: Arc<Mutex<PgConnection>>,
-    block_id: i64,
-) -> Result<Option<Vec<FailedDownload>>, AsyncDBError> {
-    async_get_failed_downloads(conn, block_id, DOWNLOAD_TYPE_DAG_ID).await
 }
 
 async fn async_get_failed_downloads(

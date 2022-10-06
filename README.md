@@ -47,6 +47,11 @@ Format: `redis://<host>[:<port>]/`
 Configures the RabbitMQ connection.
 Format: `amqp://<host>[:<port]/[database, URL encoded]`
 
+#### `PROMETHEUS_LISTEN_ADDRESS`
+
+Configures the socket address to start a prometheus endpoint on.
+You'll need a prometheus (or compatible) server to scrape this endpoint for metrics.
+
 #### `INDEXER_*_WORKER_CONCURRENCY`
 
 Configures the concurrency for each queue __per worker__.
@@ -283,10 +288,9 @@ They log to stderr on info level by default, which can be overridden via `RUST_L
 ## TODO
 
 - Implement HAMTShard worker
-- Add prometheus to the workers
-- Set up prometheus
-- Set up grafana, with provisioning
 - Refactor stuff to be nice
+- Introduce a size limit for files to handle?
+- Introduce a soft limit for directories to full ls. If larger, do a fast ls and post block stats.
 
 ## License
 

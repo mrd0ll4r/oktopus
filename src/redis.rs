@@ -1,4 +1,5 @@
 use anyhow::Context;
+use log::{debug, warn};
 use redis::aio::MultiplexedConnection;
 use redis::AsyncCommands;
 use std::env;
@@ -81,4 +82,33 @@ impl Cache {
         let res = conn.hget(self.redis_failure_name(), cid).await?;
         Ok(res)
     }
+}
+
+async fn mark_done_all_logging(cid: &str, conn: &mut RedisConnection, levels: &[Cache]) {
+    for level in levels {
+        match level.mark_done(cid, conn).await {
+            Ok(_) => {
+                debug!("{}: marked done in redis {}", cid, level.redis_done_name());
+            }
+            Err(err) => {
+                warn!(
+                    "unable to update redis cache {}: {:?}",
+                    level.redis_done_name(),
+                    err
+                )
+            }
+        }
+    }
+}
+
+pub async fn mark_done_up_to_logging(cid: &str, redis_conn: &mut RedisConnection, level: Cache) {
+    let levels = match level {
+        Cache::Cids => vec![Cache::Cids],
+        Cache::Blocks => vec![Cache::Cids, Cache::Blocks],
+        Cache::Files => vec![Cache::Cids, Cache::Blocks, Cache::Files],
+        Cache::Directories => vec![Cache::Cids, Cache::Blocks, Cache::Directories],
+        Cache::HAMTShards => vec![Cache::Cids, Cache::Blocks, Cache::HAMTShards],
+    };
+
+    mark_done_all_logging(cid, redis_conn, &levels).await
 }

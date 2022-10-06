@@ -1,10 +1,14 @@
-use anyhow::Context;
+use crate::redis::RedisConnection;
+use anyhow::{anyhow, Context};
 use cid::Cid;
 use diesel::{Connection, PgConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness};
 use ipfs_api_backend_hyper::{IpfsApi, IpfsClient};
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 #[macro_use]
@@ -20,6 +24,7 @@ pub mod hash;
 pub mod ipfs;
 pub mod logging;
 pub mod models;
+pub mod prom;
 pub mod queue;
 pub mod redis;
 pub mod schema;
@@ -115,6 +120,68 @@ pub fn run_pending_migrations(
     conn.run_pending_migrations(MIGRATIONS)
 }
 
+pub struct WorkerConnections {
+    pub db_conn: Arc<Mutex<PgConnection>>,
+    pub redis_conn: RedisConnection,
+    pub rabbitmq_conn: lapin::Connection,
+}
+
+pub async fn worker_setup() -> anyhow::Result<WorkerConnections> {
+    debug!("connecting to database...");
+    let mut conn = establish_connection().context("unable to connect to DB")?;
+    info!("connected to database");
+
+    debug!("running pending migrations...");
+    let migrations = run_pending_migrations(&mut conn)
+        .map_err(|e| anyhow!("{}", e))
+        .context("unable to run migrations")?;
+    info!("ran migrations {:?}", migrations);
+
+    let db_conn = Arc::new(Mutex::new(conn));
+
+    debug!("connecting to redis...");
+    let redis_conn = redis::connect_env()
+        .await
+        .context("unable to connect to redis")?;
+    info!("connected to redis");
+
+    debug!("connecting to RabbitMQ...");
+    let rabbitmq_conn = queue::connect_env()
+        .await
+        .context("unable to connect to RabbitMQ")?;
+    info!("connected to RabbitMQ");
+
+    debug!("setting up RabbitMQ queues...");
+    {
+        let chan = rabbitmq_conn
+            .create_channel()
+            .await
+            .context("unable to create RabbitMQ channel")?;
+        queue::Queues::set_up_queues(&chan)
+            .await
+            .context("unable to create RabbitMQ queues")?;
+    }
+    info!("set up RabbitMQ queues");
+
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
+
+    debug!("starting prometheus endpoint...");
+    let prom_addr =
+        prometheus_address_from_env().context("unable to get prometheus listen address")?;
+    prom::run_prometheus(prom_addr.clone()).context("unable to run prometheus")?;
+    info!("started prometheus endpoint on {}", prom_addr);
+
+    Ok(WorkerConnections {
+        db_conn,
+        redis_conn,
+        rabbitmq_conn,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CIDParts {
     pub cid: Cid,
@@ -149,6 +216,15 @@ pub fn parse_cid_to_parts(c: &str) -> Result<CIDParts, cid::Error> {
 
 pub fn get_mime_type(bytes: &[u8]) -> &'static str {
     tree_magic_mini::from_u8(bytes)
+}
+
+pub fn prometheus_address_from_env() -> anyhow::Result<SocketAddr> {
+    dotenvy::dotenv().context("unable to read .env file")?;
+
+    env::var("PROMETHEUS_LISTEN_ADDRESS")
+        .context(format!("missing PROMETHEUS_LISTEN_ADDRESS"))?
+        .parse::<SocketAddr>()
+        .map_err(|err| anyhow!("unable to parse PROMETHEUS_LISTEN_ADDRESS: {:?}", err))
 }
 
 fn get_u64_from_env(key: &str) -> anyhow::Result<u64> {

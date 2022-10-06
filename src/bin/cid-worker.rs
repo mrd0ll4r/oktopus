@@ -1,14 +1,16 @@
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use clap::Command;
 use diesel::PgConnection;
 use futures_util::StreamExt;
+use ipfs_indexer::prom::OutcomeLabel;
 use ipfs_indexer::queue::BlockMessage;
 use ipfs_indexer::redis::RedisConnection;
-use ipfs_indexer::{db, logging, queue, redis};
+use ipfs_indexer::{db, logging, prom, queue, redis, WorkerConnections};
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
 use log::{debug, error, info, warn};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,40 +24,15 @@ Takes CIDs from an AMQP queue, parses them, inserts block and CID information in
 Static configuration is taken from a .env file, see the README for more information.")
         .get_matches();
 
-    debug!("connecting to database...");
-    let mut conn = ipfs_indexer::establish_connection().context("unable to connect to DB")?;
-    info!("connected to database");
-
-    debug!("running pending migrations...");
-    let migrations = ipfs_indexer::run_pending_migrations(&mut conn)
-        .map_err(|e| anyhow!("{}", e))
-        .context("unable to run migrations")?;
-    info!("ran migrations {:?}", migrations);
-
-    let db_conn = Arc::new(Mutex::new(conn));
-
-    debug!("connecting to redis...");
-    let redis_conn = redis::connect_env()
+    debug!("setting up worker connections");
+    let WorkerConnections {
+        db_conn,
+        redis_conn,
+        rabbitmq_conn,
+    } = ipfs_indexer::worker_setup()
         .await
-        .context("unable to connect to redis")?;
-    info!("connected to redis");
+        .context("unable to set up connections")?;
 
-    debug!("connecting to RabbitMQ...");
-    let rabbitmq_conn = queue::connect_env()
-        .await
-        .context("unable to connect to RabbitMQ")?;
-    info!("connected to RabbitMQ");
-
-    debug!("setting up RabbitMQ queues...");
-    {
-        let chan = rabbitmq_conn
-            .create_channel()
-            .await
-            .context("unable to create RabbitMQ channel")?;
-        queue::Queues::set_up_queues(&chan)
-            .await
-            .context("unable to create RabbitMQ queues")?;
-    }
     debug!("creating channels and setting prefetch...");
     let cids_chan = rabbitmq_conn
         .create_channel()
@@ -80,13 +57,7 @@ Static configuration is taken from a .env file, see the README for more informat
         .subscribe(&cids_chan, "cids_worker")
         .await
         .context("unable to subscribe to cids queue")?;
-    info!("set up RabbitMQ queues");
-
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
+    info!("set up RabbitMQ channels and consumers");
 
     info!("listening for tasks");
     while let Some(delivery) = cids_consumer.next().await {
@@ -120,16 +91,31 @@ async fn handle_delivery(
         }
     };
 
+    let before = Instant::now();
     match handle_cid(cid, &mut redis_conn, &blocks_chan, db_conn).await {
         Ok(outcome) => {
-            // TODO prometheus
+            // Record in prometheus
+            prom::record_task_duration_no_daemon(
+                &*prom::CID_TASK_STATUS,
+                outcome,
+                before.elapsed(),
+            );
+
+            // Report to RabbitMQ
             acker
                 .ack(BasicAckOptions::default())
                 .await
                 .expect("unable to ACK delivery");
         }
         Err(outcome) => {
-            // TODO prometheus
+            // Record in prometheus
+            prom::record_task_duration_no_daemon(
+                &*prom::CID_TASK_STATUS,
+                outcome,
+                before.elapsed(),
+            );
+
+            // Report to RabbitMQ
             acker
                 .nack(BasicNackOptions {
                     requeue: true,
@@ -141,16 +127,44 @@ async fn handle_delivery(
     }
 }
 
-enum FailureOutcome {
+enum Failure {
     DbUpsertFailed,
     FailedToPostBlock,
 }
 
-enum PositiveOutcome {
+impl OutcomeLabel for Failure {
+    fn success(&self) -> bool {
+        false
+    }
+
+    fn reason(&self) -> &'static str {
+        match self {
+            Failure::DbUpsertFailed => "db_upsert_failed",
+            Failure::FailedToPostBlock => "failed_to_post_block_task",
+        }
+    }
+}
+
+enum Success {
     FailedToParse,
     SkippedNonFsRelated,
     RedisCached,
     Done,
+}
+
+impl OutcomeLabel for Success {
+    fn success(&self) -> bool {
+        true
+    }
+
+    fn reason(&self) -> &'static str {
+        match self {
+            Success::FailedToParse => "failed_to_parse",
+            Success::SkippedNonFsRelated => "skipped_non_fs_related",
+            Success::RedisCached => "redis_cached",
+            Success::Done => "done",
+        }
+    }
 }
 
 async fn handle_cid(
@@ -158,14 +172,14 @@ async fn handle_cid(
     redis_conn: &mut RedisConnection,
     blocks_chan: &lapin::Channel,
     db_conn: Arc<Mutex<PgConnection>>,
-) -> Result<PositiveOutcome, FailureOutcome> {
+) -> Result<Success, Failure> {
     // Parse CID
     debug!("{}: parsing...", cid);
     let cid_parts = match ipfs_indexer::parse_cid_to_parts(&cid) {
         Ok(parts) => parts,
         Err(err) => {
             debug!("unable to parse CID {}: {:?}", cid, err);
-            return Ok(PositiveOutcome::FailedToParse);
+            return Ok(Success::FailedToParse);
         }
     };
     debug!("{}: parsed as {:?}", cid, cid_parts);
@@ -173,7 +187,7 @@ async fn handle_cid(
     // Skip anything that's not DAG_PB or RAW
     if cid_parts.codec != ipfs_indexer::CODEC_DAG_PB && cid_parts.codec != ipfs_indexer::CODEC_RAW {
         debug!("{}: skipping non-filesystem CID", cid);
-        return Ok(PositiveOutcome::SkippedNonFsRelated);
+        return Ok(Success::SkippedNonFsRelated);
     }
 
     // Check redis
@@ -184,7 +198,7 @@ async fn handle_cid(
             if done {
                 // Refresh redis
                 redis_mark_done(&cid, redis_conn).await;
-                return Ok(PositiveOutcome::RedisCached);
+                return Ok(Success::RedisCached);
             }
         }
         Err(err) => {
@@ -199,7 +213,7 @@ async fn handle_cid(
         Ok(res) => res,
         Err(err) => {
             error!("unable to upsert CID into database: {:?}", err);
-            return Err(FailureOutcome::DbUpsertFailed);
+            return Err(Failure::DbUpsertFailed);
         }
     };
     debug!(
@@ -226,7 +240,7 @@ async fn handle_cid(
         }
         Err(err) => {
             error!("unable to post block job: {:?}", err);
-            return Err(FailureOutcome::FailedToPostBlock);
+            return Err(Failure::FailedToPostBlock);
         }
     }
 
@@ -234,16 +248,9 @@ async fn handle_cid(
     debug!("{}: marking done in redis...", cid);
     redis_mark_done(&cid, redis_conn).await;
 
-    Ok(PositiveOutcome::Done)
+    Ok(Success::Done)
 }
 
 async fn redis_mark_done(cid: &str, redis_conn: &mut RedisConnection) {
-    match redis::Cache::Cids.mark_done(cid, redis_conn).await {
-        Ok(_) => {
-            debug!("{}: marked done in redis", cid);
-        }
-        Err(err) => {
-            warn!("unable to update redis CIDs cache: {:?}", err)
-        }
-    }
+    redis::mark_done_up_to_logging(cid, redis_conn, redis::Cache::Cids).await;
 }
