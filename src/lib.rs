@@ -1,10 +1,11 @@
+use crate::db::AsyncDBError;
 use crate::redis::RedisConnection;
 use anyhow::{anyhow, Context};
 use cid::Cid;
 use diesel::{Connection, PgConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness};
 use ipfs_api_backend_hyper::{IpfsApi, IpfsClient};
-use log::{debug, info};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::net::SocketAddr;
@@ -118,6 +119,88 @@ pub fn run_pending_migrations(
     conn: &mut PgConnection,
 ) -> diesel::migration::Result<Vec<diesel::migration::MigrationVersion>> {
     conn.run_pending_migrations(MIGRATIONS)
+}
+
+pub enum CacheCheckResult {
+    RedisMarkedDone,
+    RedisFailuresAboveThreshold,
+    DbFailuresAboveThreshold,
+    NeedsProcessing,
+}
+
+#[derive(Debug, Clone)]
+pub enum Task {
+    Block,
+    File,
+    Directory,
+    HamtShard,
+}
+
+pub async fn check_task_caches(
+    task_type: Task,
+    cid: &str,
+    block_id: i64,
+    cache: redis::Cache,
+    redis_conn: &mut RedisConnection,
+    db_conn: Arc<Mutex<PgConnection>>,
+    failure_threshold: u64,
+) -> Result<CacheCheckResult, AsyncDBError> {
+    // Check redis
+    debug!("{}: checking redis", cid);
+    match cache.is_done(cid, redis_conn).await {
+        Ok(done) => {
+            debug!("{}: redis status is done={}", cid, done);
+            if done {
+                // Refresh redis
+                redis::mark_done_up_to_logging(cid, redis_conn, cache).await;
+                return Ok(CacheCheckResult::RedisMarkedDone);
+            }
+        }
+        Err(err) => {
+            warn!("unable to check redis CIDs cache: {:?}", err)
+        }
+    };
+
+    // Check redis for failures
+    debug!("{}: checking redis for failures", cid);
+    match cache.num_failed(cid, redis_conn).await {
+        Ok(res) => {
+            debug!("{}: redis failures is {:?}", cid, res);
+            if let Some(failures) = res {
+                if failures >= failure_threshold {
+                    debug!("{}: too many failures, skipping", cid);
+                    // Refresh redis
+                    redis::mark_done_up_to_logging(&cid, redis_conn, cache).await;
+                    return Ok(CacheCheckResult::RedisFailuresAboveThreshold);
+                }
+            }
+        }
+        Err(err) => {
+            warn!("unable to check redis CIDs cache: {:?}", err)
+        }
+    }
+
+    // Check database for failures
+    debug!("{}: checking database for failures", cid);
+    let db_res = match task_type {
+        Task::Block => db::async_get_failed_block_downloads(db_conn, block_id).await,
+        Task::File | Task::Directory | Task::HamtShard => {
+            db::async_get_failed_dag_downloads(db_conn, block_id).await
+        }
+    };
+    debug!("{}: database failures is {:?}", cid, db_res);
+
+    let db_res = db_res?;
+    if let Some(failures) = db_res {
+        if failures.len() as u64 >= failure_threshold {
+            debug!("{}: too many failures, skipping", cid);
+            // Mark done in redis
+            redis::mark_done_up_to_logging(&cid, redis_conn, cache).await;
+            return Ok(CacheCheckResult::DbFailuresAboveThreshold);
+        }
+    }
+
+    Ok(CacheCheckResult::NeedsProcessing)
 }
 
 pub struct WorkerConnections {

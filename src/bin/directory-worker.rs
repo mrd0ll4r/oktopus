@@ -7,7 +7,8 @@ use ipfs_indexer::prom::OutcomeLabel;
 use ipfs_indexer::queue::{DirectoryMessage, FileMessage, HamtShardMessage};
 use ipfs_indexer::redis::RedisConnection;
 use ipfs_indexer::{
-    db, ipfs, logging, models, prom, queue, redis, CIDParts, IpfsApiClient, WorkerConnections,
+    db, ipfs, logging, models, prom, queue, redis, CIDParts, CacheCheckResult, IpfsApiClient,
+    WorkerConnections,
 };
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
@@ -290,50 +291,30 @@ where
     } = msg;
     let cid = format!("{}", cid_parts.cid);
 
-    // Check redis
-    debug!("{}: checking redis", cid);
-    match redis::Cache::Directories.is_done(&cid, redis_conn).await {
-        Ok(done) => {
-            debug!("{}: redis status is done={}", cid, done);
-            if done {
-                // Refresh redis
-                redis_mark_done(&cid, redis_conn).await;
-                return Ok(Success::RedisCached);
-            }
-        }
-        Err(err) => {
-            warn!("unable to check redis CIDs cache: {:?}", err)
-        }
-    };
-
-    // Check redis for failures
-    debug!("{}: checking redis for failures", cid);
-    match redis::Cache::Directories.num_failed(&cid, redis_conn).await {
+    // Check caches
+    debug!("{}: checking caches", cid);
+    match ipfs_indexer::check_task_caches(
+        ipfs_indexer::Task::Directory,
+        &cid,
+        db_block.id,
+        redis::Cache::Directories,
+        redis_conn,
+        db_conn.clone(),
+        failure_threshold,
+    )
+    .await
+    {
         Ok(res) => {
-            debug!("{}: redis failures is {:?}", cid, res);
-            if let Some(failures) = res {
-                if failures >= failure_threshold {
-                    debug!("{}: too many failures, skipping", cid);
-                    redis_mark_done(&cid, redis_conn).await;
-                    return Ok(Success::RedisFailureCached);
+            match res {
+                CacheCheckResult::RedisMarkedDone => return Ok(Success::RedisCached),
+                CacheCheckResult::RedisFailuresAboveThreshold => {
+                    return Ok(Success::RedisFailureCached)
                 }
-            }
-        }
-        Err(err) => {
-            warn!("unable to check redis CIDs cache: {:?}", err)
-        }
-    }
-
-    // Check database for failures
-    debug!("{}: checking database for failures", cid);
-    match db::async_get_failed_dag_downloads(db_conn.clone(), db_block.id).await {
-        Ok(failures) => {
-            debug!("{}: database failures is {:?}", cid, failures);
-            if let Some(failures) = failures {
-                if failures.len() as u64 >= failure_threshold {
-                    debug!("{}: too many failures, skipping", cid);
-                    redis_mark_done(&cid, redis_conn).await;
-                    return Ok(Success::DbFailureThreshold);
+                CacheCheckResult::DbFailuresAboveThreshold => {
+                    return Ok(Success::DbFailureThreshold)
+                }
+                CacheCheckResult::NeedsProcessing => {
+                    // We have to process it (again)
                 }
             }
         }
