@@ -34,6 +34,8 @@ Static configuration is taken from a .env file, see the README for more informat
         .context("unable to determine failed DAG downloads threshold")?;
     let download_timeout = ipfs_indexer::file_worker_ipfs_timeout_secs_from_env()
         .context("unable to determine download timeout")?;
+    let file_size_limit =
+        ipfs_indexer::file_size_limit_from_env().context("unable to determine file size limit")?;
 
     let daemon_uri = matches
         .get_one::<String>("daemon")
@@ -114,6 +116,7 @@ Static configuration is taken from a .env file, see the README for more informat
                 mime_cache,
                 ipfs_client,
                 failure_threshold,
+                file_size_limit,
             )
             .await
         });
@@ -130,6 +133,7 @@ async fn handle_delivery<T>(
     mime_cache: Arc<Mutex<MimeTypeCache>>,
     ipfs_client: Arc<T>,
     failure_threshold: u64,
+    file_size_limit: u64,
 ) where
     T: IpfsApi + Sync,
 {
@@ -138,6 +142,10 @@ async fn handle_delivery<T>(
         Ok(cid) => cid,
         Err(err) => {
             warn!("unable to parse FileMessage, skipping: {:?}", err);
+            acker
+                .nack(BasicNackOptions::default())
+                .await
+                .expect("unable to NACK delivery");
             return;
         }
     };
@@ -150,6 +158,7 @@ async fn handle_delivery<T>(
         mime_cache,
         ipfs_client,
         failure_threshold,
+        file_size_limit,
     )
     .await
     {
@@ -194,6 +203,7 @@ enum Success {
     RedisFailureCached,
     DbFailureThreshold,
     UnableToParseReferencedCids,
+    FileSizeLimitExceeded,
     DbDone,
     Done,
 }
@@ -209,6 +219,7 @@ impl OutcomeLabel for Success {
             Success::RedisFailureCached => "redis_failure_cached",
             Success::DbFailureThreshold => "db_failure_threshold",
             Success::UnableToParseReferencedCids => "unable_to_parse_referenced_cids",
+            Success::FileSizeLimitExceeded => "file_size_limit_exceeded",
             Success::DbDone => "db_done",
             Success::Done => "done",
         }
@@ -246,6 +257,7 @@ async fn handle_file<T>(
     mime_cache: Arc<Mutex<MimeTypeCache>>,
     ipfs_client: Arc<T>,
     failure_threshold: u64,
+    file_size_limit: u64,
 ) -> Result<Success, Failure>
 where
     T: IpfsApi + Sync,
@@ -270,8 +282,15 @@ where
     let FileMessage {
         cid: cid_parts,
         db_block,
+        db_links,
     } = msg;
     let cid = format!("{}", cid_parts.cid);
+
+    // Check cumulative file size
+    let approx_size = db_links.iter().map(|l| l.size).sum::<i64>() as u64;
+    if approx_size > file_size_limit {
+        return Ok(Success::FileSizeLimitExceeded);
+    }
 
     // Check caches
     debug!("{}: checking caches", cid);

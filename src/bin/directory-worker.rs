@@ -497,6 +497,7 @@ where
                     &FileMessage {
                         cid: cidparts,
                         db_block: block,
+                        db_links: links,
                     },
                 )
                 .await

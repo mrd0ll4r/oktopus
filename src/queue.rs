@@ -169,6 +169,7 @@ pub fn decode_block(payload: &[u8]) -> anyhow::Result<BlockMessage> {
 pub struct FileMessage {
     pub cid: CIDParts,
     pub db_block: models::Block,
+    pub db_links: Vec<BlockLink>,
 }
 
 pub async fn post_file(c: &Channel, msg: &FileMessage) -> anyhow::Result<Confirmation> {
