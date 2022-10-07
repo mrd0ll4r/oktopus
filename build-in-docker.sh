@@ -12,6 +12,7 @@ docker cp extract:/ipfs-indexer/target/release/post-cids ./out/
 docker cp extract:/ipfs-indexer/target/release/block-worker ./out/
 docker cp extract:/ipfs-indexer/target/release/file-worker ./out/
 docker cp extract:/ipfs-indexer/target/release/directory-worker ./out/
+docker cp extract:/ipfs-indexer/target/release/hamtshard-worker ./out/
 
 docker rm extract
 
@@ -19,4 +20,5 @@ docker rm extract
 docker build -t ipfs-indexer-cid-worker -f Dockerfile.cid-worker .
 docker build -t ipfs-indexer-block-worker -f Dockerfile.block-worker .
 docker build -t ipfs-indexer-directory-worker -f Dockerfile.directory-worker .
+docker build -t ipfs-indexer-hamtshard-worker -f Dockerfile.hamtshard-worker .
 docker build -t ipfs-indexer-file-worker -f Dockerfile.file-worker .

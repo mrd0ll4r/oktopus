@@ -164,6 +164,16 @@ services:
     profiles: []
     image: "ipfs-indexer-directory-worker:latest"
 
+  hamtshard_worker_daemon01:
+    <<: *daemon01_worker
+    profiles: []
+    image: "ipfs-indexer-hamtshard-worker:latest"
+
+  hamtshard_worker_daemon02:
+    <<: *daemon02_worker
+    profiles: []
+    image: "ipfs-indexer-hamtshard-worker:latest"
+
   file_worker_daemon01:
     <<: *daemon01_worker
     profiles: []

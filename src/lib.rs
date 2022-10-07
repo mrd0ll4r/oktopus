@@ -321,6 +321,14 @@ fn get_u64_from_env(key: &str) -> anyhow::Result<u64> {
     Ok(res)
 }
 
+pub fn directory_full_ls_size_limit_from_env() -> anyhow::Result<u64> {
+    get_u64_from_env("INDEXER_DIRECTORY_FULL_LS_SIZE_LIMIT")
+}
+
+pub fn file_size_limit_from_env() -> anyhow::Result<u64> {
+    get_u64_from_env("INDEXER_FILE_SIZE_LIMIT")
+}
+
 pub fn failed_block_downloads_threshold_from_env() -> anyhow::Result<u64> {
     get_u64_from_env("INDEXER_FAILED_BLOCK_DOWNLOAD_THRESHOLD")
 }

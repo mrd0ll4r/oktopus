@@ -47,9 +47,17 @@ pub async fn async_upsert_successful_block(
 pub async fn async_upsert_successful_directory(
     conn: Arc<Mutex<PgConnection>>,
     p_block_id: i64,
-    entries: Vec<(String, i64, CIDParts, BlockLevelMetadata)>,
+    entries: Vec<(String, i64, CIDParts, Option<BlockLevelMetadata>)>,
     ts: chrono::DateTime<chrono::Utc>,
-) -> Result<Vec<(DirectoryEntry, Cid, Block, BlockStat, Vec<BlockLink>)>, AsyncDBError> {
+) -> Result<
+    Vec<(
+        DirectoryEntry,
+        Cid,
+        Block,
+        Option<(BlockStat, Vec<BlockLink>)>,
+    )>,
+    AsyncDBError,
+> {
     let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
         .get_metric_with_label_values(&["upsert_successful_directory"])
         .unwrap()
@@ -147,7 +155,17 @@ pub async fn async_upsert_block_and_cid(
 pub async fn async_get_directory_listing(
     conn: Arc<Mutex<PgConnection>>,
     p_block_id: i64,
-) -> Result<Option<Vec<(DirectoryEntry, Cid, Block, BlockStat, Vec<BlockLink>)>>, AsyncDBError> {
+) -> Result<
+    Option<
+        Vec<(
+            DirectoryEntry,
+            Cid,
+            Block,
+            Option<(BlockStat, Vec<BlockLink>)>,
+        )>,
+    >,
+    AsyncDBError,
+> {
     let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
         .get_metric_with_label_values(&["get_directory_listing"])
         .unwrap()
@@ -348,15 +366,28 @@ fn insert_block_file_alternative_cids_idempotent(
 pub fn upsert_successful_directory(
     conn: &mut PgConnection,
     p_block_id: i64,
-    entries: Vec<(String, i64, CIDParts, BlockLevelMetadata)>,
+    entries: Vec<(String, i64, CIDParts, Option<BlockLevelMetadata>)>,
     ts: chrono::DateTime<chrono::Utc>,
-) -> Result<Vec<(DirectoryEntry, Cid, Block, BlockStat, Vec<BlockLink>)>, diesel::result::Error> {
+) -> Result<
+    Vec<(
+        DirectoryEntry,
+        Cid,
+        Block,
+        Option<(BlockStat, Vec<BlockLink>)>,
+    )>,
+    diesel::result::Error,
+> {
     debug!(
         "upserting successful directory download for block {}, entries {:?}",
         p_block_id, entries
     );
 
-    conn.transaction::<Vec<(DirectoryEntry, Cid, Block, BlockStat,Vec<BlockLink>)>, diesel::result::Error, _>(|conn| {
+    conn.transaction::<Vec<(
+        DirectoryEntry,
+        Cid,
+        Block,
+        Option<(BlockStat, Vec<BlockLink>)>,
+    )>, diesel::result::Error, _>(|conn| {
         // Upsert referenced CIDs and block data for all of them
         let entries_with_stats: Result<Vec<_>, diesel::result::Error> = entries
             .iter()
@@ -364,16 +395,21 @@ pub fn upsert_successful_directory(
             .map(|(cid, stats)| {
                 let (db_block, db_cid) = upsert_block_and_cid(conn, cid.clone())?;
 
-                let (stat, links) = upsert_successful_block(
-                    conn,
-                    db_block.id,
-                    stats.block_size,
-                    stats.unixfs_type_id,
-                    stats.links,
-                    ts,
-                )?;
+                match stats {
+                    None => Ok((cid, db_cid, db_block, None)),
+                    Some(stats) => {
+                        let (stat, links) = upsert_successful_block(
+                            conn,
+                            db_block.id,
+                            stats.block_size,
+                            stats.unixfs_type_id,
+                            stats.links,
+                            ts,
+                        )?;
 
-                Ok((cid, db_cid,db_block, stat, links))
+                        Ok((cid, db_cid, db_block, Some((stat, links))))
+                    }
+                }
             })
             .collect();
         debug!("upserted blocks and stats {:?}", entries_with_stats);
@@ -383,7 +419,7 @@ pub fn upsert_successful_directory(
         let directory_entries: Result<Vec<_>, _> = entries
             .iter()
             .zip(entries_with_stats.iter())
-            .map(|((name, size, _, _), (_, cid,_, _,_))| {
+            .map(|((name, size, _, _), (_, cid, _, _))| {
                 upsert_directory_entry(conn, p_block_id, name, size, &cid.id)
             })
             .collect();
@@ -398,7 +434,7 @@ pub fn upsert_successful_directory(
         Ok(directory_entries
             .into_iter()
             .zip(entries_with_stats.into_iter())
-            .map(|(entry, (_, cid,block, stat,links))| (entry,cid,block, stat,links))
+            .map(|(entry, (_, cid, block, stat))| (entry, cid, block, stat))
             .collect())
     })
 }
@@ -711,7 +747,14 @@ pub fn get_directory_listing(
     conn: &mut PgConnection,
     p_block_id: i64,
 ) -> Result<
-    Option<Vec<(DirectoryEntry, Cid, Block, BlockStat, Vec<BlockLink>)>>,
+    Option<
+        Vec<(
+            DirectoryEntry,
+            Cid,
+            Block,
+            Option<(BlockStat, Vec<BlockLink>)>,
+        )>,
+    >,
     diesel::result::Error,
 > {
     use crate::schema::directory_entries::dsl::*;
@@ -776,7 +819,14 @@ pub fn get_directory_listing(
     let grouped_stats = block_stats
         .grouped_by(&blocks)
         .into_iter()
-        .map(|stats| stats.get(0).unwrap().clone())
+        .map(|stats| {
+            if stats.is_empty() {
+                None
+            } else {
+                assert_eq!(stats.len(), 1);
+                Some(stats.get(0).unwrap().clone())
+            }
+        })
         .collect::<Vec<_>>();
 
     let block_links: Vec<BlockLink> = BlockLink::belonging_to(&blocks)
@@ -791,6 +841,13 @@ pub fn get_directory_listing(
         .into_iter()
         .zip(grouped_stats)
         .zip(grouped_links)
+        .map(|((b, s), l)| match s {
+            Some(stats) => (b, Some((stats, l))),
+            None => {
+                assert_eq!(l.len(), 0);
+                (b, None)
+            }
+        })
         .collect::<Vec<_>>();
 
     // Pretty slow algorithm, but at least it works.
@@ -811,20 +868,12 @@ pub fn get_directory_listing(
                 cid.clone(),
                 blocks_with_stat_and_links
                     .iter()
-                    .find(|b| cid.block_id == b.0 .0.id)
+                    .find(|b| cid.block_id == b.0.id)
                     .unwrap()
                     .clone(),
             )
         })
-        .map(|(entry, cid, block_stat)| {
-            (
-                entry,
-                cid,
-                block_stat.0 .0.clone(),
-                block_stat.0 .1.clone(),
-                block_stat.1,
-            )
-        })
+        .map(|(entry, cid, block_stat)| (entry, cid, block_stat.0, block_stat.1))
         .collect();
 
     Ok(Some(entries))

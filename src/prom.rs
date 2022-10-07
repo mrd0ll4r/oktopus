@@ -18,6 +18,12 @@ lazy_static! {
         &["daemon", "status", "reason"]
     )
     .unwrap();
+    pub static ref HAMTSHARD_TASK_STATUS: HistogramVec = register_histogram_vec!(
+        "hamtshard_task_status",
+        "TODO",
+        &["daemon", "status", "reason"]
+    )
+    .unwrap();
     pub static ref CID_TASK_STATUS: HistogramVec =
         register_histogram_vec!("cid_task_status", "TODO", &["status", "reason"]).unwrap();
     pub static ref DB_METHOD_CALL_DURATIONS: HistogramVec =
