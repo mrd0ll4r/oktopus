@@ -30,8 +30,10 @@ Static configuration is taken from a .env file, see the README for more informat
             .default_value("http://127.0.0.1:5001"))
         .get_matches();
 
-    let failure_threshold = ipfs_indexer::failed_directory_downloads_threshold_from_env()
+    let failure_threshold = ipfs_indexer::failed_file_downloads_threshold_from_env()
         .context("unable to determine failed DAG downloads threshold")?;
+    let download_timeout = ipfs_indexer::file_worker_ipfs_timeout_secs_from_env()
+        .context("unable to determine download timeout")?;
 
     let daemon_uri = matches
         .get_one::<String>("daemon")
@@ -40,13 +42,11 @@ Static configuration is taken from a .env file, see the README for more informat
     debug!("connecting to IPFS daemon...");
     let client: IpfsApiClient = ipfs_api_backend_hyper::IpfsClient::from_str(daemon_uri)
         .context("unable to create client")?;
-    let timeout_secs = ipfs_indexer::file_worker_ipfs_timeout_secs_from_env()
-        .context("unable to determine download timeout")?;
     let client_with_timeout = ipfs_api_backend_hyper::BackendWithGlobalOptions::new(
         client,
         ipfs_api_backend_hyper::GlobalOptions {
             offline: None,
-            timeout: Some(Duration::from_secs(timeout_secs)),
+            timeout: Some(Duration::from_secs(download_timeout)),
         },
     );
     let client = Arc::new(client_with_timeout);

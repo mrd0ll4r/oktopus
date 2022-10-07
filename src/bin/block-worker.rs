@@ -32,6 +32,8 @@ Static configuration is taken from a .env file, see the README for more informat
 
     let failure_threshold = ipfs_indexer::failed_block_downloads_threshold_from_env()
         .context("unable to determine failed block downloads threshold")?;
+    let download_timeout = ipfs_indexer::block_worker_ipfs_timeout_secs_from_env()
+        .context("unable to determine download timeout")?;
 
     let daemon_uri = matches
         .get_one::<String>("daemon")
@@ -44,7 +46,7 @@ Static configuration is taken from a .env file, see the README for more informat
         client,
         ipfs_api_backend_hyper::GlobalOptions {
             offline: None,
-            timeout: Some(Duration::from_secs(30)),
+            timeout: Some(Duration::from_secs(download_timeout)),
         },
     );
     let client = Arc::new(client_with_timeout);
