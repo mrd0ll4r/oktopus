@@ -1,5 +1,5 @@
 use crate::IpfsApi;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use cid::Cid;
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
@@ -138,10 +138,15 @@ impl AlternativeCids {
             ..Default::default()
         };
 
+        let _timer = crate::prom::IPFS_METHOD_CALL_DURATIONS
+            .get_metric_with_label_values(&[format!("add_{}", hash).as_str()])
+            .unwrap()
+            .start_timer();
         let resp = client
             .add_with_options(cursor, opts)
             .await
-            .map_err(|err| anyhow!("{}", err))?;
+            .map_err(|err| anyhow!("{}", err))
+            .context(anyhow!("unable to compute alternative {} cid", hash))?;
         Ok(resp.hash)
     }
 }
