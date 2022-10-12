@@ -55,6 +55,12 @@ services:
       - "http://daemon01:5001"
     depends_on:
       <<: *daemon_01_depends
+    links:
+      - rabbitmq
+      - redis
+      - db
+      - prometheus
+      - daemon01
 
   daemon02_worker_dummy: &daemon02_worker
     <<: *basic_worker
@@ -63,6 +69,12 @@ services:
       - "http://daemon02:5001"
     depends_on:
       <<: *daemon_02_depends
+    links:
+      - rabbitmq
+      - redis
+      - db
+      - prometheus
+      - daemon02
 
   db:
     image: "postgres:14"
@@ -178,17 +190,16 @@ services:
     <<: *daemon01_worker
     profiles: []
     image: "ipfs-indexer-file-worker:latest"
-    oom_kill_disable: true
 
   file_worker_daemon02:
     <<: *daemon02_worker
     profiles: []
     image: "ipfs-indexer-file-worker:latest"
-    oom_kill_disable: true
 
   grafana:
     # https://hub.docker.com/r/grafana/grafana/tags
     image: grafana/grafana:8.3.4
+    restart: unless-stopped
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
@@ -208,6 +219,7 @@ services:
   prometheus:
     # https://hub.docker.com/r/prom/prometheus/tags
     image: prom/prometheus:v2.39.0
+    restart: unless-stopped
     expose:
       - 9090
     #ports:
@@ -221,6 +233,7 @@ services:
       - '--path.rootfs=/rootfs'
       - '--path.sysfs=/host/sys'
       - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: unless-stopped
     expose:
       - 9100
     # https://hub.docker.com/r/prom/node-exporter/tags
@@ -234,6 +247,7 @@ services:
       - 8080
     # https://hub.docker.com/r/google/cadvisor/tags
     image: google/cadvisor:v0.33.0
+    restart: unless-stopped
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:rw
