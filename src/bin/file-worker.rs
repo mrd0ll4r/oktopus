@@ -350,11 +350,12 @@ where
         cid
     );
 
-    let (mime_type, sha256_hash, alternative_cids_binary, layers, dag_block_cids) =
+    let (mime_type, file_size, sha256_hash, alternative_cids_binary, layers, dag_block_cids) =
         match download_file(ipfs_client, cid_parts, &cid).await {
             Ok(metadata) => {
                 let FileMetadata {
                     mime_type,
+                    file_size,
                     sha256_hash,
                     alternative_cids_binary,
                     layers,
@@ -362,6 +363,7 @@ where
                 } = metadata;
                 (
                     mime_type,
+                    file_size,
                     sha256_hash,
                     alternative_cids_binary,
                     layers,
@@ -410,6 +412,7 @@ where
         mime_cache,
         db_block.id,
         mime_type,
+        file_size,
         sha256_hash,
         alternative_cids_binary,
         layers,
@@ -441,6 +444,7 @@ where
 
 struct FileMetadata {
     mime_type: &'static str,
+    file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids_binary: Vec<Vec<u8>>,
     layers: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
@@ -468,6 +472,7 @@ where
         file_data.len(),
         file_data.iter().take(10).collect::<Vec<_>>()
     );
+    let file_size = file_data.len();
 
     // Compute heuristics, hash, alternative CIDs
     let mime_type = ipfs_indexer::get_mime_type(&file_data);
@@ -543,6 +548,7 @@ where
 
     Ok(FileMetadata {
         mime_type,
+        file_size: file_size as i64,
         sha256_hash,
         alternative_cids_binary,
         layers,

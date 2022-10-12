@@ -78,6 +78,7 @@ pub async fn async_upsert_successful_file(
     mime_cache: Arc<Mutex<MimeTypeCache>>,
     p_block_id: i64,
     mime_type: &'static str,
+    file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids: Vec<Vec<u8>>,
     dag: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
@@ -97,6 +98,7 @@ pub async fn async_upsert_successful_file(
             &mut cache,
             p_block_id,
             mime_type,
+            file_size,
             sha256_hash,
             alternative_cids,
             dag,
@@ -183,7 +185,7 @@ pub async fn async_get_directory_listing(
 pub async fn async_get_file_heuristics(
     conn: Arc<Mutex<PgConnection>>,
     block_id: i64,
-) -> Result<Option<BlockFileMimeType>, AsyncDBError> {
+) -> Result<Option<BlockFileMetadata>, AsyncDBError> {
     let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
         .get_metric_with_label_values(&["get_file_heuristics"])
         .unwrap()
@@ -191,7 +193,7 @@ pub async fn async_get_file_heuristics(
 
     tokio::task::spawn_blocking(move || {
         let mut conn = conn.lock().unwrap();
-        get_file_heuristics(&mut conn, block_id)
+        get_file_metadata(&mut conn, block_id)
     })
     .await
     .map_err(AsyncDBError::Runtime)?
@@ -245,6 +247,7 @@ pub fn upsert_successful_file(
     mime_cache: &mut MimeTypeCache,
     p_block_id: i64,
     mime_type: &str,
+    file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids: Vec<Vec<u8>>,
     dag: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
@@ -256,8 +259,8 @@ pub fn upsert_successful_file(
         // Determine MIME type ID
         let mime_type_id = mime_cache.lookup_or_insert(conn, mime_type)?;
 
-        // Insert MIME type
-        insert_block_file_mime_type_idempotent(conn, p_block_id, mime_type_id)?;
+        // Insert MIME type and file size
+        insert_block_file_metadata_idempotent(conn, p_block_id, mime_type_id, file_size)?;
 
         // Insert SHA256 hash
         insert_block_file_hash_idempotent(conn, p_block_id, HASH_TYPE_SHA2_256_ID, &sha256_hash)?;
@@ -292,21 +295,23 @@ pub fn upsert_successful_file(
     })
 }
 
-fn insert_block_file_mime_type_idempotent(
+fn insert_block_file_metadata_idempotent(
     conn: &mut PgConnection,
     p_block_id: i64,
     p_mime_type_id: i32,
+    file_size: i64,
 ) -> Result<(), diesel::result::Error> {
-    use crate::schema::block_file_mime_types;
+    use crate::schema::block_file_metadata;
 
-    let new_mime_type = NewBlockFileMimeType {
+    let new_metadata = NewBlockFileMetadata {
         block_id: &p_block_id,
         mime_type_id: &p_mime_type_id,
+        file_size: &file_size,
     };
 
-    debug!("upserting block file MIME type {:?}", new_mime_type);
-    diesel::insert_into(block_file_mime_types::table)
-        .values(new_mime_type)
+    debug!("upserting block file metadata type {:?}", new_metadata);
+    diesel::insert_into(block_file_metadata::table)
+        .values(new_metadata)
         .on_conflict_do_nothing()
         .execute(conn)
         .optional()?;
@@ -322,15 +327,15 @@ fn insert_block_file_hash_idempotent(
 ) -> Result<(), diesel::result::Error> {
     use crate::schema::block_file_hashes;
 
-    let new_mime_type = NewBlockFileHash {
+    let new_hash = NewBlockFileHash {
         block_id: &p_block_id,
         hash_type_id: &hash_type_id,
         digest,
     };
 
-    debug!("upserting block file hash {:?}", new_mime_type);
+    debug!("upserting block file hash {:?}", new_hash);
     diesel::insert_into(block_file_hashes::table)
-        .values(new_mime_type)
+        .values(new_hash)
         .on_conflict_do_nothing()
         .execute(conn)
         .optional()?;
@@ -879,18 +884,18 @@ pub fn get_directory_listing(
     Ok(Some(entries))
 }
 
-pub fn get_file_heuristics(
+pub fn get_file_metadata(
     conn: &mut PgConnection,
     p_block_id: i64,
-) -> Result<Option<BlockFileMimeType>, diesel::result::Error> {
-    use crate::schema::block_file_mime_types::dsl::*;
-    debug!("getting file heuristics for block {}", p_block_id);
+) -> Result<Option<BlockFileMetadata>, diesel::result::Error> {
+    use crate::schema::block_file_metadata::dsl::*;
+    debug!("getting file metadata for block {}", p_block_id);
 
-    block_file_mime_types
+    block_file_metadata
         .filter(block_id.eq(p_block_id))
-        .first::<BlockFileMimeType>(conn)
+        .first::<BlockFileMetadata>(conn)
         .map(|res| {
-            debug!("got file heuristics {:?}", res);
+            debug!("got file metadata {:?}", res);
             res
         })
         .optional()

@@ -288,7 +288,6 @@ They log to stderr on info level by default, which can be overridden via `RUST_L
 ## TODO
 
 - Refactor stuff to be nice
-- Index file sizes
 
 ## License
 

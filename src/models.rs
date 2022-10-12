@@ -157,17 +157,19 @@ pub struct NewMimeType<'a> {
 }
 
 #[derive(Identifiable, Associations, Queryable, Debug, Clone, PartialEq, Eq)]
-#[diesel(table_name=block_file_mime_types,primary_key(block_id),belongs_to(Block, foreign_key=block_id),belongs_to(MimeType, foreign_key=mime_type_id))]
-pub struct BlockFileMimeType {
+#[diesel(table_name=block_file_metadata,primary_key(block_id),belongs_to(Block, foreign_key=block_id),belongs_to(MimeType, foreign_key=mime_type_id))]
+pub struct BlockFileMetadata {
     pub block_id: i64,
     pub mime_type_id: i32,
+    pub file_size: Option<i64>,
 }
 
 #[derive(Insertable, Debug)]
-#[diesel(table_name=block_file_mime_types)]
-pub struct NewBlockFileMimeType<'a> {
+#[diesel(table_name=block_file_metadata)]
+pub struct NewBlockFileMetadata<'a> {
     pub block_id: &'a i64,
     pub mime_type_id: &'a i32,
+    pub file_size: &'a i64,
 }
 
 #[derive(
