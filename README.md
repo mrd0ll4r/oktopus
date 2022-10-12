@@ -287,10 +287,8 @@ They log to stderr on info level by default, which can be overridden via `RUST_L
 
 ## TODO
 
-- Implement HAMTShard worker
 - Refactor stuff to be nice
-- Introduce a size limit for files to handle?
-- Introduce a soft limit for directories to full ls. If larger, do a fast ls and post block stats.
+- Index file sizes
 
 ## License
 
