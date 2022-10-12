@@ -4,11 +4,13 @@ use diesel::PgConnection;
 use futures_util::StreamExt;
 use ipfs_api_backend_hyper::{IpfsApi, TryFromUri};
 use ipfs_indexer::cache::MimeTypeCache;
+use ipfs_indexer::ipfs::BlockLevelMetadata;
 use ipfs_indexer::prom::OutcomeLabel;
 use ipfs_indexer::queue::FileMessage;
 use ipfs_indexer::redis::RedisConnection;
 use ipfs_indexer::{
-    db, hash, ipfs, logging, prom, queue, redis, CacheCheckResult, IpfsApiClient, WorkerConnections,
+    db, hash, ipfs, logging, prom, queue, redis, CIDParts, CacheCheckResult, IpfsApiClient,
+    WorkerConnections,
 };
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
@@ -348,110 +350,58 @@ where
         cid
     );
 
-    let file_data = match ipfs::query_ipfs_for_file_data(&cid, ipfs_client.clone()).await {
-        Ok(data) => data,
-        Err(err) => {
-            debug!("{}: failed to download file: {:?}", cid, err);
+    let (mime_type, sha256_hash, alternative_cids_binary, layers, dag_block_cids) =
+        match download_file(ipfs_client, cid_parts, &cid).await {
+            Ok(metadata) => {
+                let FileMetadata {
+                    mime_type,
+                    sha256_hash,
+                    alternative_cids_binary,
+                    layers,
+                    dag_block_cids,
+                } = metadata;
+                (
+                    mime_type,
+                    sha256_hash,
+                    alternative_cids_binary,
+                    layers,
+                    dag_block_cids,
+                )
+            }
+            Err(err) => {
+                match err {
+                    Ok(reason) => {
+                        // This should only happen if we fail to parse referenced CIDs
+                        assert!(matches!(reason, Success::UnableToParseReferencedCids));
+                        return Ok(Success::UnableToParseReferencedCids);
+                    }
+                    Err(err) => {
+                        match db::async_insert_dag_download_failure(
+                            db_conn.clone(),
+                            db_block.id,
+                            chrono::Utc::now(),
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                debug!("{}: marked failed in database", cid);
+                            }
+                            Err(err) => {
+                                error!(
+                                    "unable to insert download failure into database: {:?}",
+                                    err
+                                );
+                                return Err(Failure::DbFailureInsertFailed);
+                            }
+                        }
 
-            match db::async_insert_dag_download_failure(
-                db_conn.clone(),
-                db_block.id,
-                chrono::Utc::now(),
-            )
-            .await
-            {
-                Ok(_) => {
-                    debug!("{}: marked failed in database", cid);
-                }
-                Err(err) => {
-                    error!("unable to insert download failure into database: {:?}", err);
-                    return Err(Failure::DbFailureInsertFailed);
+                        redis_mark_failed(&cid, redis_conn).await;
+
+                        return Err(err);
+                    }
                 }
             }
-
-            redis_mark_failed(&cid, redis_conn).await;
-
-            return Err(Failure::DownloadFailed);
-        }
-    };
-    debug!(
-        "{}: got {} bytes of file data, first bytes: {:?}",
-        cid,
-        file_data.len(),
-        file_data.iter().take(10).collect::<Vec<_>>()
-    );
-
-    // Compute heuristics, hash, alternative CIDs
-    let mime_type = ipfs_indexer::get_mime_type(&file_data);
-    debug!("{}: detected MIME type {}", cid, mime_type);
-    let sha256_hash = hash::compute_sha256(&file_data);
-    let alternative_cids = hash::AlternativeCids::for_bytes(ipfs_client.clone(), file_data)
-        .await
-        .map_err(|err| {
-            warn!(
-                "unable to compute alternative CIDs for file {}: {:?}",
-                cid, err
-            );
-            Failure::FailedToComputeAlternativeCids
-        })?;
-    debug!("{}: computed alternative CIDs {:?}", cid, alternative_cids);
-    let alternative_cids_binary = alternative_cids.binary_cidv1s().map_err(|err| {
-        warn!(
-            "unable to get binary CIDv1s for alternative CIDs {:?} for file {}: {:?}",
-            alternative_cids, cid, err
-        );
-        Failure::FailedToComputeAlternativeCids
-    })?;
-
-    // Download block data of entire referenced DAG, in layers.
-    debug!("{}: downloading DAG metadata", cid);
-    let mut layers = Vec::new();
-    let mut dag_block_cids = Vec::new();
-    let root_metadata =
-        ipfs::query_ipfs_for_block_level_data(&cid, cid_parts.codec, ipfs_client.clone())
-            .await
-            .map_err(|err| {
-                debug!("{}: unable to get metadata for root block: {:?}", cid, err);
-                Failure::DownloadFailed
-            })?
-            .expect("unable to parse children CIDs of block already present in database");
-    debug!("{}: got root metadata {:?}", cid, root_metadata);
-    let mut current_layer = Some(vec![root_metadata.links]);
-    while let Some(layer) = current_layer.take() {
-        if layer.is_empty() {
-            break;
-        }
-        let mut wip_layer = Vec::new();
-        for (_, _, child_cidparts) in layer.into_iter().flatten() {
-            let child_cid = format!("{}", child_cidparts.cid);
-            dag_block_cids.push(child_cid.clone());
-            let child_metadata = match ipfs::query_ipfs_for_block_level_data(
-                &child_cid,
-                child_cidparts.codec,
-                ipfs_client.clone(),
-            )
-            .await
-            .map_err(|err| {
-                debug!("{}: unable to get metadata for root block: {:?}", cid, err);
-                Failure::DownloadFailed
-            })? {
-                Ok(metadata) => metadata,
-                Err(_) => {
-                    debug!("{}: failed to parse CID of child blocks", cid);
-                    return Ok(Success::UnableToParseReferencedCids);
-                }
-            };
-            wip_layer.push((child_cidparts, child_metadata));
-        }
-
-        current_layer = Some(
-            wip_layer
-                .iter()
-                .map(|(_, metadata)| metadata.links.clone())
-                .collect(),
-        );
-        layers.push(wip_layer);
-    }
+        };
 
     // Insert into database
     debug!("{}: inserting successful file into database", cid);
@@ -487,6 +437,117 @@ where
     redis_mark_done(&cid, redis_conn).await;
 
     Ok(Success::Done)
+}
+
+struct FileMetadata {
+    mime_type: &'static str,
+    sha256_hash: Vec<u8>,
+    alternative_cids_binary: Vec<Vec<u8>>,
+    layers: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
+    dag_block_cids: Vec<String>,
+}
+
+async fn download_file<T>(
+    ipfs_client: Arc<T>,
+    cid_parts: CIDParts,
+    cid: &String,
+) -> Result<FileMetadata, Result<Success, Failure>>
+where
+    T: IpfsApi + Sync,
+{
+    let file_data = match ipfs::query_ipfs_for_file_data(&cid, ipfs_client.clone()).await {
+        Ok(data) => data,
+        Err(err) => {
+            debug!("{}: failed to download file: {:?}", cid, err);
+            return Err(Err(Failure::DownloadFailed));
+        }
+    };
+    debug!(
+        "{}: got {} bytes of file data, first bytes: {:?}",
+        cid,
+        file_data.len(),
+        file_data.iter().take(10).collect::<Vec<_>>()
+    );
+
+    // Compute heuristics, hash, alternative CIDs
+    let mime_type = ipfs_indexer::get_mime_type(&file_data);
+    debug!("{}: detected MIME type {}", cid, mime_type);
+    let sha256_hash = hash::compute_sha256(&file_data);
+    let alternative_cids = hash::AlternativeCids::for_bytes(ipfs_client.clone(), file_data)
+        .await
+        .map_err(|err| {
+            warn!(
+                "unable to compute alternative CIDs for file {}: {:?}",
+                cid, err
+            );
+            Err(Failure::FailedToComputeAlternativeCids)
+        })?;
+    debug!("{}: computed alternative CIDs {:?}", cid, alternative_cids);
+    let alternative_cids_binary = alternative_cids.binary_cidv1s().map_err(|err| {
+        warn!(
+            "unable to get binary CIDv1s for alternative CIDs {:?} for file {}: {:?}",
+            alternative_cids, cid, err
+        );
+        Err(Failure::FailedToComputeAlternativeCids)
+    })?;
+
+    // Download block data of entire referenced DAG, in layers.
+    debug!("{}: downloading DAG metadata", cid);
+    let mut layers = Vec::new();
+    let mut dag_block_cids = Vec::new();
+    let root_metadata =
+        ipfs::query_ipfs_for_block_level_data(&cid, cid_parts.codec, ipfs_client.clone())
+            .await
+            .map_err(|err| {
+                debug!("{}: unable to get metadata for root block: {:?}", cid, err);
+                Err(Failure::DownloadFailed)
+            })?
+            .expect("unable to parse children CIDs of block already present in database");
+    debug!("{}: got root metadata {:?}", cid, root_metadata);
+    let mut current_layer = Some(vec![root_metadata.links]);
+    while let Some(layer) = current_layer.take() {
+        if layer.is_empty() {
+            break;
+        }
+        let mut wip_layer = Vec::new();
+        for (_, _, child_cidparts) in layer.into_iter().flatten() {
+            let child_cid = format!("{}", child_cidparts.cid);
+            dag_block_cids.push(child_cid.clone());
+            let child_metadata = match ipfs::query_ipfs_for_block_level_data(
+                &child_cid,
+                child_cidparts.codec,
+                ipfs_client.clone(),
+            )
+            .await
+            .map_err(|err| {
+                debug!("{}: unable to get metadata for child block: {:?}", cid, err);
+                Err(Failure::DownloadFailed)
+            })? {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    debug!("{}: failed to parse CID of child blocks", cid);
+                    return Err(Ok(Success::UnableToParseReferencedCids));
+                }
+            };
+            wip_layer.push((child_cidparts, child_metadata));
+        }
+
+        current_layer = Some(
+            wip_layer
+                .iter()
+                .map(|(_, metadata)| metadata.links.clone())
+                .collect(),
+        );
+        layers.push(wip_layer);
+    }
+
+    Ok(FileMetadata {
+        mime_type,
+        sha256_hash,
+        alternative_cids_binary,
+        layers,
+        dag_block_cids,
+    })
 }
 
 async fn redis_mark_failed(cid: &str, redis_conn: &mut RedisConnection) {
