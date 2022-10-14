@@ -1,3 +1,4 @@
+use crate::TaskOutcome::{Done, Skipped};
 use anyhow::Context;
 use clap::Command;
 use diesel::PgConnection;
@@ -7,8 +8,8 @@ use ipfs_indexer::queue::BlockMessage;
 use ipfs_indexer::redis::RedisConnection;
 use ipfs_indexer::{db, logging, prom, queue, redis, WorkerConnections};
 use lapin::message::Delivery;
-use lapin::options::{BasicAckOptions, BasicNackOptions};
-use log::{debug, error, info, warn};
+use lapin::options::BasicAckOptions;
+use log::{debug, info, warn};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -92,77 +93,47 @@ async fn handle_delivery(
     };
 
     let before = Instant::now();
-    match handle_cid(cid, &mut redis_conn, &blocks_chan, db_conn).await {
-        Ok(outcome) => {
-            // Record in prometheus
-            prom::record_task_duration_no_daemon(
-                &*prom::CID_TASK_STATUS,
-                outcome,
-                before.elapsed(),
-            );
+    let outcome = handle_cid(cid, &mut redis_conn, &blocks_chan, db_conn).await;
 
-            // Report to RabbitMQ
-            acker
-                .ack(BasicAckOptions::default())
-                .await
-                .expect("unable to ACK delivery");
-        }
-        Err(outcome) => {
-            // Record in prometheus
-            prom::record_task_duration_no_daemon(
-                &*prom::CID_TASK_STATUS,
-                outcome,
-                before.elapsed(),
-            );
+    // Record in prometheus
+    prom::record_task_duration_no_daemon(&*prom::CID_TASK_STATUS, outcome, before.elapsed());
 
-            // Report to RabbitMQ
-            acker
-                .nack(BasicNackOptions {
-                    requeue: true,
-                    ..Default::default()
-                })
-                .await
-                .expect("unable to NACK delivery");
-        }
-    }
+    // Report to RabbitMQ
+    acker
+        .ack(BasicAckOptions::default())
+        .await
+        .expect("unable to ACK delivery");
 }
 
-enum Failure {
-    DbUpsertFailed,
-    FailedToPostBlock,
-}
-
-impl OutcomeLabel for Failure {
-    fn success(&self) -> bool {
-        false
-    }
-
-    fn reason(&self) -> &'static str {
-        match self {
-            Failure::DbUpsertFailed => "db_upsert_failed",
-            Failure::FailedToPostBlock => "failed_to_post_block_task",
-        }
-    }
-}
-
-enum Success {
+#[derive(Clone, Copy, Debug)]
+enum SkipReason {
     FailedToParse,
     SkippedNonFsRelated,
     RedisCached,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TaskOutcome {
+    Skipped(SkipReason),
     Done,
 }
 
-impl OutcomeLabel for Success {
-    fn success(&self) -> bool {
-        true
+impl OutcomeLabel for TaskOutcome {
+    fn status(&self) -> &'static str {
+        match self {
+            Skipped(_) => "skipped",
+            Done => "done",
+        }
     }
 
     fn reason(&self) -> &'static str {
         match self {
-            Success::FailedToParse => "failed_to_parse",
-            Success::SkippedNonFsRelated => "skipped_non_fs_related",
-            Success::RedisCached => "redis_cached",
-            Success::Done => "done",
+            Skipped(reason) => match reason {
+                SkipReason::FailedToParse => "failed_to_parse",
+                SkipReason::SkippedNonFsRelated => "skipped_non_fs_related",
+                SkipReason::RedisCached => "redis_cached",
+            },
+            Done => "task_posted",
         }
     }
 }
@@ -172,14 +143,14 @@ async fn handle_cid(
     redis_conn: &mut RedisConnection,
     blocks_chan: &lapin::Channel,
     db_conn: Arc<Mutex<PgConnection>>,
-) -> Result<Success, Failure> {
+) -> TaskOutcome {
     // Parse CID
     debug!("{}: parsing...", cid);
     let cid_parts = match ipfs_indexer::parse_cid_to_parts(&cid) {
         Ok(parts) => parts,
         Err(err) => {
             debug!("unable to parse CID {}: {:?}", cid, err);
-            return Ok(Success::FailedToParse);
+            return Skipped(SkipReason::FailedToParse);
         }
     };
     debug!("{}: parsed as {:?}", cid, cid_parts);
@@ -187,7 +158,7 @@ async fn handle_cid(
     // Skip anything that's not DAG_PB or RAW
     if cid_parts.codec != ipfs_indexer::CODEC_DAG_PB && cid_parts.codec != ipfs_indexer::CODEC_RAW {
         debug!("{}: skipping non-filesystem CID", cid);
-        return Ok(Success::SkippedNonFsRelated);
+        return Skipped(SkipReason::SkippedNonFsRelated);
     }
 
     // Check redis
@@ -198,7 +169,7 @@ async fn handle_cid(
             if done {
                 // Refresh redis
                 redis_mark_done(&cid, redis_conn).await;
-                return Ok(Success::RedisCached);
+                return Skipped(SkipReason::RedisCached);
             }
         }
         Err(err) => {
@@ -208,14 +179,9 @@ async fn handle_cid(
 
     // Upsert CID into database
     debug!("{}: upserting...", cid);
-    let (db_block, db_cid) = match db::async_upsert_block_and_cid(db_conn, cid_parts.clone()).await
-    {
-        Ok(res) => res,
-        Err(err) => {
-            error!("unable to upsert CID into database: {:?}", err);
-            return Err(Failure::DbUpsertFailed);
-        }
-    };
+    let (db_block, db_cid) = db::async_upsert_block_and_cid(db_conn, cid_parts.clone())
+        .await
+        .expect("unable to upsert CID into database");
     debug!(
         "{}: upserted, got block {:?}, cid {:?}",
         cid, db_block, db_cid
@@ -223,7 +189,7 @@ async fn handle_cid(
 
     // Post block task to RabbitMQ
     debug!("{}: posting block task...", cid);
-    match queue::post_block(
+    let confirmation = queue::post_block(
         blocks_chan,
         &BlockMessage {
             cid: cid_parts,
@@ -231,24 +197,17 @@ async fn handle_cid(
         },
     )
     .await
-    {
-        Ok(confirmation) => {
-            debug!(
-                "{}: posted block task, got confirmation {:?}",
-                cid, confirmation
-            )
-        }
-        Err(err) => {
-            error!("unable to post block job: {:?}", err);
-            return Err(Failure::FailedToPostBlock);
-        }
-    }
+    .expect("unable to post block job");
+    debug!(
+        "{}: posted block task, got confirmation {:?}",
+        cid, confirmation
+    );
 
     // Update redis
     debug!("{}: marking done in redis...", cid);
     redis_mark_done(&cid, redis_conn).await;
 
-    Ok(Success::Done)
+    Done
 }
 
 async fn redis_mark_done(cid: &str, redis_conn: &mut RedisConnection) {

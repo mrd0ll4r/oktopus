@@ -101,7 +101,13 @@ The plan is to launch one indexer per daemon and task.
 This keeps the indexer binaries simple, and makes it easier to manage stuff via Docker.
 For example, if a daemon dies, all associated indexers can gracefully die, everything will be restarted via Docker, no messages are lost due to RabbitMQ, and everything is fantastic.
 
-TODO: the message types (i.e., task definitions) are not up to date.
+Whenever a database operation or an interaction with RabbitMQ fails, the worker exits with a panic.
+Database operations failing are ruled out at compile-time for the most up-to-date schema.
+Failures thus indicate that the database is running a different schema than expected.
+Failing to post tasks to or receive tasks from RabbitMQ should never happen either.
+No messages are lost when a worker exits -- they will be auto-NACKed after a while and re-queued.
+
+TODO: the message types (i.e., task definitions) are not up-to-date.
 
 #### Queue `cids`:
 
@@ -144,21 +150,22 @@ TODO: the message types (i.e., task definitions) are not up to date.
 - -> inserts the entire DAG of that file, plus heuristics for the topmost block, the root of the file DAG
 - This also computes a SHA256 hash of the entire file, as well as multiple alternative CIDs
 - Algorithm:
-  1. (optimization) Check Redis `files` for CID -> skip to 9
-  2. (optimization) Check Redis for `failed_files` counter -> if >= THRESHOLD skip to 9
-  3. Check DB for failed downloads counter -> if >= THRESHOLD skip to 9
-  4. (optimization) Check DB for file heuristics -> skip to 9
-  5. Download file and run heuristics, hash calculations, alternative CID calculations etc. on it
-  6. Calculate block-level info for DAG blocks
-  7. If failed: Record in DB, record in Redis, requeue to RabbitMQ, return
-  8. In one transaction:
+  1. (optimization) Check Redis `files` for CID -> skip to 10
+  2. (optimization) Check Redis for `failed_files` counter -> if >= THRESHOLD skip to 10
+  3. Check DB for failed downloads counter -> if >= THRESHOLD skip to 10
+  4. (optimization) Check DB for file heuristics -> skip to 10
+  5. Estimate file size using references -> if too large, skip to 11
+  6. Download file and run heuristics, hash calculations, alternative CID calculations etc. on it
+  7. Calculate block-level info for DAG blocks
+  8. If failed: Record in DB, record in Redis, requeue to RabbitMQ, return
+  9. In one transaction:
      1. Insert heuristics
      2. Insert alternative CIDs
      3. Insert SHA256 hash of the file
      4. Insert block-level info for DAG blocks
-  9. (optimization) Insert CID into Redis `files`, `blocks`, and `cids`
-  10. (optimization) Insert DAG CIDs into Redis `cids` and `blocks`
-  11. ACK to RabbitMQ
+  10. (optimization) Insert CID into Redis `files`, `blocks`, and `cids`
+  11. (optimization) Insert DAG CIDs into Redis `cids` and `blocks`
+  12. ACK to RabbitMQ
 - (optimization) Marginally faster on the daemon that indexed the block, but probably doesn't matter (because the DAG needs to be fetched)
 
 #### Queue `directories`
@@ -172,15 +179,15 @@ TODO: the message types (i.e., task definitions) are not up to date.
   2. (optimization) Check Redis `failed_directories` counter -> if >= THRESHOLD skip to 11
   3. Check DB for failed downloads counter -> if >= THRESHOLD skip to  11
   4. (optimization) Check DB for directory entries -> skip to 9
-  5. Full LS (gets immediate sub-blocks)
-  6. For each:
+  5. Full LS (gets immediate sub-blocks) or fast ls if too many references
+  6. For each: (only for full ls)
      1. Get block level info (this should be fast because the blocks are prefetched) 
      2. `object data` to get UnixFS type of entries
   7. If anything failed: Record in DB, record in Redis, requeue to RabbitMQ, return
   8. In one transaction:
-     1. Insert block-level info for entries 
-     2. Insert directory entries with correct UnixFS type
-  9. Push entries to `files`, `directories`, and `hamtshards`
+     1. Insert block-level info for entries (only for full ls)
+     2. Insert directory entries
+  9. Push entries to `files`, `directories`, and `hamtshards` (only for full ls)
   10. (optimization) Insert entry CIDs into Redis `cids` and `blocks`
   11. (optimization) Insert directory CID into Redis `directories` ,`blocks`, and `cids`
   12. ACK to RabbitMQ

@@ -1,3 +1,4 @@
+use crate::TaskOutcome::{Done, Failed, Skipped};
 use anyhow::Context;
 use clap::{arg, Command};
 use diesel::PgConnection;
@@ -14,7 +15,7 @@ use ipfs_indexer::{
 };
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -153,7 +154,7 @@ async fn handle_delivery<T>(
     };
 
     let before = Instant::now();
-    match handle_file(
+    let outcome = handle_file(
         msg,
         &mut redis_conn,
         db_conn,
@@ -162,33 +163,25 @@ async fn handle_delivery<T>(
         failure_threshold,
         file_size_limit,
     )
-    .await
-    {
-        Ok(outcome) => {
-            // Record in prometheus
-            prom::record_task_duration(
-                &*prom::FILE_TASK_STATUS,
-                outcome,
-                before.elapsed(),
-                &daemon_uri,
-            );
+    .await;
 
-            // Report to RabbitMQ
+    // Record in prometheus
+    prom::record_task_duration(
+        &*prom::FILE_TASK_STATUS,
+        outcome,
+        before.elapsed(),
+        &daemon_uri,
+    );
+
+    // Report to RabbitMQ
+    match outcome {
+        Skipped(_) | Done => {
             acker
                 .ack(BasicAckOptions::default())
                 .await
                 .expect("unable to ACK delivery");
         }
-        Err(outcome) => {
-            // Record in prometheus
-            prom::record_task_duration(
-                &*prom::FILE_TASK_STATUS,
-                outcome,
-                before.elapsed(),
-                &daemon_uri,
-            );
-
-            // Report to RabbitMQ
+        Failed(_) => {
             acker
                 .nack(BasicNackOptions {
                     requeue: true,
@@ -200,54 +193,55 @@ async fn handle_delivery<T>(
     }
 }
 
-enum Success {
+#[derive(Clone, Copy, Debug)]
+enum SkipReason {
     RedisCached,
     RedisFailureCached,
     DbFailureThreshold,
     UnableToParseReferencedCids,
     FileSizeLimitExceeded,
     DbDone,
-    Done,
 }
 
-impl OutcomeLabel for Success {
-    fn success(&self) -> bool {
-        true
-    }
-
-    fn reason(&self) -> &'static str {
-        match self {
-            Success::RedisCached => "redis_cached",
-            Success::RedisFailureCached => "redis_failure_cached",
-            Success::DbFailureThreshold => "db_failure_threshold",
-            Success::UnableToParseReferencedCids => "unable_to_parse_referenced_cids",
-            Success::FileSizeLimitExceeded => "file_size_limit_exceeded",
-            Success::DbDone => "db_done",
-            Success::Done => "done",
-        }
-    }
-}
-
-enum Failure {
-    DbSelectFailed,
+#[derive(Clone, Copy, Debug)]
+enum FailureReason {
     DownloadFailed,
-    DbUpsertFailed,
-    DbFailureInsertFailed,
     FailedToComputeAlternativeCids,
 }
 
-impl OutcomeLabel for Failure {
-    fn success(&self) -> bool {
-        false
+#[derive(Clone, Copy, Debug)]
+enum TaskOutcome {
+    Skipped(SkipReason),
+    Done,
+    Failed(FailureReason),
+}
+
+impl OutcomeLabel for TaskOutcome {
+    fn status(&self) -> &'static str {
+        match self {
+            Skipped(_) => "skipped",
+            Done => "done",
+            Failed(_) => "failed",
+        }
     }
 
     fn reason(&self) -> &'static str {
         match self {
-            Failure::DbSelectFailed => "db_select_failed",
-            Failure::DownloadFailed => "download_failed",
-            Failure::DbUpsertFailed => "db_upsert_failed",
-            Failure::DbFailureInsertFailed => "db_failure_insert_failed",
-            Failure::FailedToComputeAlternativeCids => "failed_to_compute_alternative_cids",
+            Skipped(reason) => match reason {
+                SkipReason::RedisCached => "redis_cached",
+                SkipReason::RedisFailureCached => "redis_failure_cached",
+                SkipReason::DbFailureThreshold => "db_failure_threshold",
+                SkipReason::UnableToParseReferencedCids => "unable_to_parse_referenced_cids",
+                SkipReason::FileSizeLimitExceeded => "size_limit_exceeded",
+                SkipReason::DbDone => "db_done",
+            },
+            Done => "done",
+            Failed(reason) => match reason {
+                FailureReason::DownloadFailed => "download_failed",
+                FailureReason::FailedToComputeAlternativeCids => {
+                    "failed_to_compute_alternative_cids"
+                }
+            },
         }
     }
 }
@@ -260,27 +254,10 @@ async fn handle_file<T>(
     ipfs_client: Arc<T>,
     failure_threshold: u64,
     file_size_limit: u64,
-) -> Result<Success, Failure>
+) -> TaskOutcome
 where
     T: IpfsApi + Sync,
 {
-    /*
-        1. (optimization) Check Redis `files` for CID -> skip to 9
-    2. (optimization) Check Redis for `failed_files` counter -> if >= THRESHOLD skip to 9
-    3. Check DB for failed downloads counter -> if >= THRESHOLD skip to 9
-    4. (optimization) Check DB for file heuristics -> skip to 9
-    5. Download file and run heuristics, hash calculations, alternative CID calculations etc. on it
-    6. Calculate block-level info for DAG blocks
-    7. If failed: Record in DB, record in Redis, requeue to RabbitMQ, return
-    8. In one transaction:
-       1. Insert heuristics
-       2. Insert alternative CIDs
-       3. Insert SHA256 hash of the file
-       4. Insert block-level info for DAG blocks
-    9. (optimization) Insert CID into Redis `files`, `blocks`, and `cids`
-    10. ACK to RabbitMQ
-       */
-
     let FileMessage {
         cid: cid_parts,
         db_block,
@@ -291,7 +268,7 @@ where
     // Check cumulative file size
     let approx_size = db_links.iter().map(|l| l.size).sum::<i64>() as u64;
     if approx_size > file_size_limit {
-        return Ok(Success::FileSizeLimitExceeded);
+        return Skipped(SkipReason::FileSizeLimitExceeded);
     }
 
     // Check caches
@@ -306,43 +283,31 @@ where
         failure_threshold,
     )
     .await
+    .expect("unable to check block failures in database")
     {
-        Ok(res) => {
-            match res {
-                CacheCheckResult::RedisMarkedDone => return Ok(Success::RedisCached),
-                CacheCheckResult::RedisFailuresAboveThreshold => {
-                    return Ok(Success::RedisFailureCached)
-                }
-                CacheCheckResult::DbFailuresAboveThreshold => {
-                    return Ok(Success::DbFailureThreshold)
-                }
-                CacheCheckResult::NeedsProcessing => {
-                    // We have to process it (again)
-                }
-            }
+        CacheCheckResult::RedisMarkedDone => return Skipped(SkipReason::RedisCached),
+        CacheCheckResult::RedisFailuresAboveThreshold => {
+            return Skipped(SkipReason::RedisFailureCached)
         }
-        Err(err) => {
-            error!("unable to check block failures in database: {:?}", err);
-            return Err(Failure::DbSelectFailed);
+        CacheCheckResult::DbFailuresAboveThreshold => {
+            return Skipped(SkipReason::DbFailureThreshold)
+        }
+        CacheCheckResult::NeedsProcessing => {
+            // We have to process it (again)
         }
     }
 
     // Check database for file-level metadata
     debug!("{}: checking database for file heuristics", cid);
-    match db::async_get_file_heuristics(db_conn.clone(), db_block.id).await {
-        Ok(res) => {
-            if res.is_some() {
-                debug!("{}: database has file heuristics, skipping", cid);
+    let res = db::async_get_file_heuristics(db_conn.clone(), db_block.id)
+        .await
+        .expect("unable to check file heuristics in database");
+    if res.is_some() {
+        debug!("{}: database has file heuristics, skipping", cid);
 
-                redis_mark_done(&cid, redis_conn).await;
+        redis_mark_done(&cid, redis_conn).await;
 
-                return Ok(Success::DbDone);
-            }
-        }
-        Err(err) => {
-            error!("unable to check file heuristics in database: {:?}", err);
-            return Err(Failure::DbSelectFailed);
-        }
+        return Skipped(SkipReason::DbDone);
     }
 
     debug!(
@@ -352,62 +317,46 @@ where
 
     let (mime_type, file_size, sha256_hash, alternative_cids_binary, layers, dag_block_cids) =
         match download_file(ipfs_client, cid_parts, &cid).await {
-            Ok(metadata) => {
-                let FileMetadata {
-                    mime_type,
-                    file_size,
-                    sha256_hash,
-                    alternative_cids_binary,
-                    layers,
-                    dag_block_cids,
-                } = metadata;
-                (
-                    mime_type,
-                    file_size,
-                    sha256_hash,
-                    alternative_cids_binary,
-                    layers,
-                    dag_block_cids,
-                )
-            }
-            Err(err) => {
-                match err {
-                    Ok(reason) => {
-                        // This should only happen if we fail to parse referenced CIDs
-                        assert!(matches!(reason, Success::UnableToParseReferencedCids));
-                        return Ok(Success::UnableToParseReferencedCids);
-                    }
-                    Err(err) => {
-                        match db::async_insert_dag_download_failure(
-                            db_conn.clone(),
-                            db_block.id,
-                            chrono::Utc::now(),
-                        )
-                        .await
-                        {
-                            Ok(_) => {
-                                debug!("{}: marked failed in database", cid);
-                            }
-                            Err(err) => {
-                                error!(
-                                    "unable to insert download failure into database: {:?}",
-                                    err
-                                );
-                                return Err(Failure::DbFailureInsertFailed);
-                            }
-                        }
-
-                        redis_mark_failed(&cid, redis_conn).await;
-
-                        return Err(err);
-                    }
+            Ok(res) => match res {
+                Ok(metadata) => {
+                    let FileMetadata {
+                        mime_type,
+                        file_size,
+                        sha256_hash,
+                        alternative_cids_binary,
+                        layers,
+                        dag_block_cids,
+                    } = metadata;
+                    (
+                        mime_type,
+                        file_size,
+                        sha256_hash,
+                        alternative_cids_binary,
+                        layers,
+                        dag_block_cids,
+                    )
                 }
+                Err(skip_reason) => return Skipped(skip_reason),
+            },
+            Err(err) => {
+                db::async_insert_dag_download_failure(
+                    db_conn.clone(),
+                    db_block.id,
+                    chrono::Utc::now(),
+                )
+                .await
+                .expect("unable to insert download failure into database");
+                debug!("{}: marked failed in database", cid);
+
+                redis_mark_failed(&cid, redis_conn).await;
+
+                return Failed(err);
             }
         };
 
     // Insert into database
     debug!("{}: inserting successful file into database", cid);
-    if let Err(err) = ipfs_indexer::db::async_upsert_successful_file(
+    db::async_upsert_successful_file(
         db_conn,
         mime_cache,
         db_block.id,
@@ -419,10 +368,8 @@ where
         chrono::Utc::now(),
     )
     .await
-    {
-        error!("unable to upsert file metadata into database: {:?}", err);
-        return Err(Failure::DbUpsertFailed);
-    }
+    .expect("unable to upsert file metadata into database");
+
     debug!("{}: upserted successfully", cid);
 
     // Mark DAG blocks done in redis
@@ -439,7 +386,7 @@ where
     debug!("{}: marking done in redis...", cid);
     redis_mark_done(&cid, redis_conn).await;
 
-    Ok(Success::Done)
+    Done
 }
 
 struct FileMetadata {
@@ -455,7 +402,7 @@ async fn download_file<T>(
     ipfs_client: Arc<T>,
     cid_parts: CIDParts,
     cid: &String,
-) -> Result<FileMetadata, Result<Success, Failure>>
+) -> Result<Result<FileMetadata, SkipReason>, FailureReason>
 where
     T: IpfsApi + Sync,
 {
@@ -463,7 +410,7 @@ where
         Ok(data) => data,
         Err(err) => {
             debug!("{}: failed to download file: {:?}", cid, err);
-            return Err(Err(Failure::DownloadFailed));
+            return Err(FailureReason::DownloadFailed);
         }
     };
     debug!(
@@ -485,7 +432,7 @@ where
                 "unable to compute alternative CIDs for file {}: {:?}",
                 cid, err
             );
-            Err(Failure::FailedToComputeAlternativeCids)
+            FailureReason::FailedToComputeAlternativeCids
         })?;
     debug!("{}: computed alternative CIDs {:?}", cid, alternative_cids);
     let alternative_cids_binary = alternative_cids.binary_cidv1s().map_err(|err| {
@@ -493,7 +440,7 @@ where
             "unable to get binary CIDv1s for alternative CIDs {:?} for file {}: {:?}",
             alternative_cids, cid, err
         );
-        Err(Failure::FailedToComputeAlternativeCids)
+        FailureReason::FailedToComputeAlternativeCids
     })?;
 
     // Download block data of entire referenced DAG, in layers.
@@ -505,7 +452,7 @@ where
             .await
             .map_err(|err| {
                 debug!("{}: unable to get metadata for root block: {:?}", cid, err);
-                Err(Failure::DownloadFailed)
+                FailureReason::DownloadFailed
             })?
             .expect("unable to parse children CIDs of block already present in database");
     debug!("{}: got root metadata {:?}", cid, root_metadata);
@@ -526,12 +473,12 @@ where
             .await
             .map_err(|err| {
                 debug!("{}: unable to get metadata for child block: {:?}", cid, err);
-                Err(Failure::DownloadFailed)
+                FailureReason::DownloadFailed
             })? {
                 Ok(metadata) => metadata,
                 Err(_) => {
                     debug!("{}: failed to parse CID of child blocks", cid);
-                    return Err(Ok(Success::UnableToParseReferencedCids));
+                    return Ok(Err(SkipReason::UnableToParseReferencedCids));
                 }
             };
             wip_layer.push((child_cidparts, child_metadata));
@@ -546,14 +493,14 @@ where
         layers.push(wip_layer);
     }
 
-    Ok(FileMetadata {
+    Ok(Ok(FileMetadata {
         mime_type,
         file_size: file_size as i64,
         sha256_hash,
         alternative_cids_binary,
         layers,
         dag_block_cids,
-    })
+    }))
 }
 
 async fn redis_mark_failed(cid: &str, redis_conn: &mut RedisConnection) {

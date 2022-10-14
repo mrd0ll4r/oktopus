@@ -33,7 +33,7 @@ lazy_static! {
 }
 
 pub trait OutcomeLabel {
-    fn success(&self) -> bool;
+    fn status(&self) -> &'static str;
     fn reason(&self) -> &'static str;
 }
 
@@ -42,17 +42,9 @@ where
     H: Deref<Target = HistogramVec>,
     O: OutcomeLabel,
 {
-    hist.get_metric_with_label_values(&[
-        daemon,
-        if outcome.success() {
-            "success"
-        } else {
-            "failure"
-        },
-        outcome.reason(),
-    ])
-    .unwrap()
-    .observe(duration.as_secs_f64())
+    hist.get_metric_with_label_values(&[daemon, outcome.status(), outcome.reason()])
+        .unwrap()
+        .observe(duration.as_secs_f64())
 }
 
 pub fn record_task_duration_no_daemon<H, O>(hist: H, outcome: O, duration: Duration)
@@ -60,16 +52,9 @@ where
     H: Deref<Target = HistogramVec>,
     O: OutcomeLabel,
 {
-    hist.get_metric_with_label_values(&[
-        if outcome.success() {
-            "success"
-        } else {
-            "failure"
-        },
-        outcome.reason(),
-    ])
-    .unwrap()
-    .observe(duration.as_secs_f64())
+    hist.get_metric_with_label_values(&[outcome.status(), outcome.reason()])
+        .unwrap()
+        .observe(duration.as_secs_f64())
 }
 
 /// Starts a thread to serve prometheus metrics.

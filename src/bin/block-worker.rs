@@ -1,3 +1,4 @@
+use crate::TaskOutcome::{Done, Failed, Skipped};
 use anyhow::Context;
 use clap::{arg, Command};
 use diesel::PgConnection;
@@ -12,7 +13,7 @@ use ipfs_indexer::{
 };
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -159,7 +160,7 @@ async fn handle_delivery<T>(
     };
 
     let before = Instant::now();
-    match handle_block(
+    let outcome = handle_block(
         msg,
         &mut redis_conn,
         files_chan,
@@ -169,33 +170,25 @@ async fn handle_delivery<T>(
         ipfs_client,
         failure_threshold,
     )
-    .await
-    {
-        Ok(outcome) => {
-            // Record in prometheus
-            prom::record_task_duration(
-                &*prom::BLOCK_TASK_STATUS,
-                outcome,
-                before.elapsed(),
-                &daemon_uri,
-            );
+    .await;
 
-            // Report to RabbitMQ
+    // Record in prometheus
+    prom::record_task_duration(
+        &*prom::BLOCK_TASK_STATUS,
+        outcome,
+        before.elapsed(),
+        &daemon_uri,
+    );
+
+    // Report to RabbitMQ
+    match outcome {
+        Skipped(_) | Done(_) => {
             acker
                 .ack(BasicAckOptions::default())
                 .await
                 .expect("unable to ACK delivery");
         }
-        Err(outcome) => {
-            // Record in prometheus
-            prom::record_task_duration(
-                &*prom::BLOCK_TASK_STATUS,
-                outcome,
-                before.elapsed(),
-                &daemon_uri,
-            );
-
-            // Report to RabbitMQ
+        Failed(_) => {
             acker
                 .nack(BasicNackOptions {
                     requeue: true,
@@ -207,52 +200,56 @@ async fn handle_delivery<T>(
     }
 }
 
-enum Success {
+#[derive(Clone, Copy, Debug)]
+enum SkipReason {
     RedisCached,
     RedisFailureCached,
     DbFailureThreshold,
-    SkippedUnixFsSymlinkOrMetadata,
     UnableToParseReferencedCids,
-    Done,
 }
 
-impl OutcomeLabel for Success {
-    fn success(&self) -> bool {
-        true
-    }
+#[derive(Clone, Copy, Debug)]
+enum FailureReason {
+    DownloadFailed,
+}
 
-    fn reason(&self) -> &'static str {
+#[derive(Clone, Copy, Debug)]
+enum DoneReason {
+    TaskPosted,
+    SkippedUnixFsSymlinkOrMetadata,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TaskOutcome {
+    Skipped(SkipReason),
+    Done(DoneReason),
+    Failed(FailureReason),
+}
+
+impl OutcomeLabel for TaskOutcome {
+    fn status(&self) -> &'static str {
         match self {
-            Success::RedisCached => "redis_cached",
-            Success::RedisFailureCached => "redis_failure_cached",
-            Success::DbFailureThreshold => "db_failure_threshold",
-            Success::SkippedUnixFsSymlinkOrMetadata => "skipped_unixfs_symlink_or_metadata",
-            Success::UnableToParseReferencedCids => "unable_to_parse_referenced_cids",
-            Success::Done => "done",
+            Skipped(_) => "skipped",
+            Done(_) => "done",
+            Failed(_) => "failed",
         }
     }
-}
-
-enum Failure {
-    DbSelectFailed,
-    DownloadFailed,
-    DbUpsertFailed,
-    DbFailureInsertFailed,
-    FailedToPostTask,
-}
-
-impl OutcomeLabel for Failure {
-    fn success(&self) -> bool {
-        false
-    }
 
     fn reason(&self) -> &'static str {
         match self {
-            Failure::DbSelectFailed => "db_select_failed",
-            Failure::DownloadFailed => "download_failed",
-            Failure::DbUpsertFailed => "db_upsert_failed",
-            Failure::DbFailureInsertFailed => "db_insert_failed",
-            Failure::FailedToPostTask => "failed_to_post_task",
+            Skipped(reason) => match reason {
+                SkipReason::RedisCached => "redis_cached",
+                SkipReason::RedisFailureCached => "redis_failure_cached",
+                SkipReason::DbFailureThreshold => "db_failure_threshold",
+                SkipReason::UnableToParseReferencedCids => "unable_to_parse_referenced_cids",
+            },
+            Done(reason) => match reason {
+                DoneReason::TaskPosted => "task_posted",
+                DoneReason::SkippedUnixFsSymlinkOrMetadata => "skipped_unixfs_symlink_or_metadata",
+            },
+            Failed(reason) => match reason {
+                FailureReason::DownloadFailed => "download_failed",
+            },
         }
     }
 }
@@ -266,22 +263,10 @@ async fn handle_block<T>(
     db_conn: Arc<Mutex<PgConnection>>,
     ipfs_client: Arc<T>,
     failure_threshold: u64,
-) -> Result<Success, Failure>
+) -> TaskOutcome
 where
     T: IpfsApi + Sync,
 {
-    /*
-        1. (optimization) Check Redis `blocks` for CID -> skip to 9
-    2. (optimization) Check Redis for `failed_blocks` counter -> if >= THRESHOLD skip to 9
-    3. Check DB for failed downloads counter -> if >= THRESHOLD skip to 9
-    4. (optimization) Check DB for block-level stats, especially UnixFS type -> skip to 8
-    5. Download and stat block
-    6. If failed: Record in DB, record in Redis, requeue to RabbitMQ, return
-    7. Insert block-level info+DAG references into DB, in one transaction
-    8. Push CID to `files`, `directories`, or `hamtshards`
-    9. (optimization) Insert CID into Redis `blocks` and `cids`
-       */
-
     let BlockMessage {
         cid: cid_parts,
         db_block,
@@ -300,36 +285,25 @@ where
         failure_threshold,
     )
     .await
+    .expect("unable to check block failures in database")
     {
-        Ok(res) => {
-            match res {
-                CacheCheckResult::RedisMarkedDone => return Ok(Success::RedisCached),
-                CacheCheckResult::RedisFailuresAboveThreshold => {
-                    return Ok(Success::RedisFailureCached)
-                }
-                CacheCheckResult::DbFailuresAboveThreshold => {
-                    return Ok(Success::DbFailureThreshold)
-                }
-                CacheCheckResult::NeedsProcessing => {
-                    // We have to process it (again)
-                }
-            }
+        CacheCheckResult::RedisMarkedDone => return Skipped(SkipReason::RedisCached),
+        CacheCheckResult::RedisFailuresAboveThreshold => {
+            return Skipped(SkipReason::RedisFailureCached)
         }
-        Err(err) => {
-            error!("unable to check block failures in database: {:?}", err);
-            return Err(Failure::DbSelectFailed);
+        CacheCheckResult::DbFailuresAboveThreshold => {
+            return Skipped(SkipReason::DbFailureThreshold)
+        }
+        CacheCheckResult::NeedsProcessing => {
+            // We have to process it (again)
         }
     }
 
     // Check database for block-level stats
     debug!("{}: checking database for block-level stats", cid);
-    let block_stats = match db::async_get_block_stats(db_conn.clone(), db_block.id).await {
-        Ok(res) => res,
-        Err(err) => {
-            error!("unable to check block status in database: {:?}", err);
-            return Err(Failure::DbSelectFailed);
-        }
-    };
+    let block_stats = db::async_get_block_stats(db_conn.clone(), db_block.id)
+        .await
+        .expect("unable to check block status in database");
 
     let (block_stat, links) = match block_stats {
         Some((stat, links)) => (stat, links),
@@ -349,42 +323,31 @@ where
                             Ok(metadata) => metadata,
                             Err(_) => {
                                 // Parsing the referenced CID failed.
-                                // TODO record this as a failure? Probably not.
-                                return Ok(Success::UnableToParseReferencedCids);
+                                return Skipped(SkipReason::UnableToParseReferencedCids);
                             }
                         }
                     }
                     Err(err) => {
                         debug!("{}: unable to get block-level metadata: {:?}", cid, err);
 
-                        match db::async_insert_block_download_failure(
+                        db::async_insert_block_download_failure(
                             db_conn.clone(),
                             db_block.id,
                             chrono::Utc::now(),
                         )
                         .await
-                        {
-                            Ok(_) => {
-                                debug!("{}: marked failed in database", cid);
-                            }
-                            Err(err) => {
-                                error!(
-                                    "unable to insert download failure into database: {:?}",
-                                    err
-                                );
-                                return Err(Failure::DbFailureInsertFailed);
-                            }
-                        }
+                        .expect("unable to insert download failure into database");
+                        debug!("{}: marked failed in database", cid);
 
                         redis_mark_failed(&cid, redis_conn).await;
 
-                        return Err(Failure::DownloadFailed);
+                        return Failed(FailureReason::DownloadFailed);
                     }
                 };
             debug!("{}: got metadata {:?}", cid, block_level_metadata);
 
             debug!("{}: inserting metadata to database", cid);
-            let (block_stat, links) = match db::async_upsert_successful_block(
+            let (block_stat, links) = db::async_upsert_successful_block(
                 db_conn.clone(),
                 db_block.id,
                 block_level_metadata.block_size,
@@ -393,13 +356,7 @@ where
                 chrono::Utc::now(),
             )
             .await
-            {
-                Ok(res) => res,
-                Err(err) => {
-                    error!("unable to upsert block metadata into database: {:?}", err);
-                    return Err(Failure::DbUpsertFailed);
-                }
-            };
+            .expect("unable to upsert block metadata into database");
             debug!(
                 "{}: upserted, got block stat {:?}, links {:?}",
                 cid, block_stat, links
@@ -418,7 +375,7 @@ where
         models::UNIXFS_TYPE_METADATA_ID | models::UNIXFS_TYPE_SYMLINK_ID => {
             debug!("{}: skipping UnixFS metadata or symlink", cid);
             redis_mark_done(&cid, redis_conn).await;
-            return Ok(Success::SkippedUnixFsSymlinkOrMetadata);
+            return Done(DoneReason::SkippedUnixFsSymlinkOrMetadata);
         }
         models::UNIXFS_TYPE_FILE_ID | models::UNIXFS_TYPE_RAW_ID => {
             debug!("{}: posting file task", cid);
@@ -459,21 +416,14 @@ where
             unreachable!("invalid UnixFS type in database")
         }
     };
-    match post_job_res {
-        Ok(confirmation) => {
-            debug!("{}: posted task, got confirmation {:?}", cid, confirmation)
-        }
-        Err(err) => {
-            error!("unable to post task: {:?}", err);
-            return Err(Failure::FailedToPostTask);
-        }
-    }
+    let confirmation = post_job_res.expect("unable to post task");
+    debug!("{}: posted task, got confirmation {:?}", cid, confirmation);
 
     // Update redis
     debug!("{}: marking done in redis...", cid);
     redis_mark_done(&cid, redis_conn).await;
 
-    Ok(Success::Done)
+    Done(DoneReason::TaskPosted)
 }
 
 async fn redis_mark_failed(cid: &str, redis_conn: &mut RedisConnection) {
