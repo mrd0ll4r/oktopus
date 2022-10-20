@@ -211,17 +211,21 @@ pub struct NewDirectoryEntry<'a> {
 }
 
 #[derive(Identifiable, Associations, Queryable, Debug, Clone, PartialEq, Eq)]
-#[diesel(table_name=block_file_alternative_cids,primary_key(block_id,cid_v1),belongs_to(Block, foreign_key=block_id))]
+#[diesel(table_name=block_file_alternative_cids,primary_key(block_id,codec,hash_type_id),belongs_to(Block, foreign_key=block_id),belongs_to(HashType, foreign_key=hash_type_id))]
 pub struct BlockFileAlternativeCid {
     pub block_id: i64,
-    pub cid_v1: Vec<u8>,
+    pub digest: Vec<u8>,
+    pub codec: i64,
+    pub hash_type_id: i32,
 }
 
 #[derive(Insertable, Debug)]
 #[diesel(table_name=block_file_alternative_cids)]
 pub struct NewBlockFileAlternativeCid<'a> {
     pub block_id: &'a i64,
-    pub cid_v1: &'a [u8],
+    pub digest: &'a [u8],
+    pub codec: &'a i64,
+    pub hash_type_id: &'a i32,
 }
 
 #[derive(Identifiable, Queryable, PartialEq, Eq, Debug, Clone)]
@@ -229,17 +233,23 @@ pub struct NewBlockFileAlternativeCid<'a> {
 pub struct HashType {
     pub id: i32,
     pub name: String,
+    pub multiformat_code: i64,
+    pub digest_bytes: i32,
 }
 
 /// Hash type constants, inserted into the database via migrations.
 pub const HASH_TYPE_SHA2_256_ID: i32 = 1;
-
-lazy_static! {
-    pub static ref HASH_TYPE_SHA2_256: HashType = HashType {
-        id: HASH_TYPE_SHA2_256_ID,
-        name: "SHA2_256".to_string()
-    };
-}
+pub const HASH_TYPE_SHA1_ID: i32 = 2;
+pub const HASH_TYPE_SHA2_512_ID: i32 = 3;
+pub const HASH_TYPE_SHA3_224_ID: i32 = 4;
+pub const HASH_TYPE_SHA3_256_ID: i32 = 5;
+pub const HASH_TYPE_SHA3_384_ID: i32 = 6;
+pub const HASH_TYPE_SHA3_512_ID: i32 = 7;
+pub const HASH_TYPE_DBL_SHA2_256_ID: i32 = 8;
+pub const HASH_TYPE_KECCAK_256_ID: i32 = 9;
+pub const HASH_TYPE_KECCAK_512_ID: i32 = 10;
+pub const HASH_TYPE_BLAKE3_256_ID: i32 = 11;
+pub const HASH_TYPE_SHAKE_256_ID: i32 = 12;
 
 #[derive(Identifiable, Associations, Queryable, Debug, Clone, PartialEq, Eq)]
 #[diesel(table_name=block_file_hashes,primary_key(block_id,hash_type_id),belongs_to(Block, foreign_key=block_id),belongs_to(HashType, foreign_key=hash_type_id))]

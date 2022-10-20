@@ -1,4 +1,4 @@
-use crate::IpfsApi;
+use crate::{models, IpfsApi};
 use anyhow::{anyhow, Context};
 use cid::Cid;
 use sha2::{Digest, Sha256};
@@ -38,8 +38,15 @@ pub struct AlternativeCids {
     // poseidon_bls12_381_a2_fc1: String, // panics the daemon
 }
 
+#[derive(Debug, Clone)]
+pub struct NormalizedAlternativeCid {
+    pub hash_type_id: i32,
+    pub codec: i64,
+    pub digest: Vec<u8>,
+}
+
 impl AlternativeCids {
-    pub fn binary_cidv1s(&self) -> anyhow::Result<Vec<Vec<u8>>> {
+    pub fn normalized_cids(&self) -> anyhow::Result<Vec<NormalizedAlternativeCid>> {
         vec![
             &self.sha1,
             &self.sha2_256,
@@ -57,12 +64,29 @@ impl AlternativeCids {
             &self.shake_256,
         ]
         .into_iter()
-        .map(|c| {
+        .zip(
+            vec![
+                models::HASH_TYPE_SHA1_ID,
+                models::HASH_TYPE_SHA2_256_ID,
+                models::HASH_TYPE_SHA2_512_ID,
+                models::HASH_TYPE_SHA3_224_ID,
+                models::HASH_TYPE_SHA3_256_ID,
+                models::HASH_TYPE_SHA3_384_ID,
+                models::HASH_TYPE_SHA3_512_ID,
+                models::HASH_TYPE_DBL_SHA2_256_ID,
+                models::HASH_TYPE_KECCAK_256_ID,
+                models::HASH_TYPE_KECCAK_512_ID,
+                models::HASH_TYPE_BLAKE3_256_ID,
+                models::HASH_TYPE_SHAKE_256_ID,
+            ]
+            .into_iter(),
+        )
+        .map(|(c, id)| {
             Cid::from_str(c)
-                .map(|cid| {
-                    cid.into_v1()
-                        .expect("unable to convert CID to v1")
-                        .to_bytes()
+                .map(|cid| NormalizedAlternativeCid {
+                    hash_type_id: id,
+                    codec: cid.codec() as i64,
+                    digest: cid.hash().digest().to_vec(),
                 })
                 .map_err(|err| anyhow!("{}", err))
         })

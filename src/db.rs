@@ -1,5 +1,6 @@
 use crate::cache::MimeTypeCache;
 use crate::diesel::BelongingToDsl;
+use crate::hash::NormalizedAlternativeCid;
 use crate::ipfs::BlockLevelMetadata;
 pub use crate::models::*;
 use crate::CIDParts;
@@ -80,7 +81,7 @@ pub async fn async_upsert_successful_file(
     mime_type: &'static str,
     file_size: i64,
     sha256_hash: Vec<u8>,
-    alternative_cids: Vec<Vec<u8>>,
+    alternative_cids: Vec<NormalizedAlternativeCid>,
     dag: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
     ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), AsyncDBError> {
@@ -249,7 +250,7 @@ pub fn upsert_successful_file(
     mime_type: &str,
     file_size: i64,
     sha256_hash: Vec<u8>,
-    alternative_cids: Vec<Vec<u8>>,
+    alternative_cids: Vec<NormalizedAlternativeCid>,
     dag: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
     ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), diesel::result::Error> {
@@ -346,7 +347,7 @@ fn insert_block_file_hash_idempotent(
 fn insert_block_file_alternative_cids_idempotent(
     conn: &mut PgConnection,
     p_block_id: i64,
-    alternative_cids: Vec<Vec<u8>>,
+    alternative_cids: Vec<NormalizedAlternativeCid>,
 ) -> Result<(), diesel::result::Error> {
     use crate::schema::block_file_alternative_cids;
 
@@ -354,7 +355,9 @@ fn insert_block_file_alternative_cids_idempotent(
         .iter()
         .map(|c| NewBlockFileAlternativeCid {
             block_id: &p_block_id,
-            cid_v1: c.as_slice(),
+            digest: &c.digest,
+            codec: &c.codec,
+            hash_type_id: &c.hash_type_id,
         })
         .collect();
 

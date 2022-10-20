@@ -1,9 +1,11 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    block_file_alternative_cids (block_id, cid_v1) {
+    block_file_alternative_cids (block_id, codec, hash_type_id) {
         block_id -> Int8,
-        cid_v1 -> Bytea,
+        digest -> Bytea,
+        codec -> Int8,
+        hash_type_id -> Int4,
     }
 }
 
@@ -83,6 +85,8 @@ diesel::table! {
     hash_types (id) {
         id -> Int4,
         name -> Text,
+        multiformat_code -> Int8,
+        digest_bytes -> Int4,
     }
 }
 
@@ -109,6 +113,7 @@ diesel::table! {
 }
 
 diesel::joinable!(block_file_alternative_cids -> blocks (block_id));
+diesel::joinable!(block_file_alternative_cids -> hash_types (hash_type_id));
 diesel::joinable!(block_file_hashes -> blocks (block_id));
 diesel::joinable!(block_file_hashes -> hash_types (hash_type_id));
 diesel::joinable!(block_file_metadata -> blocks (block_id));

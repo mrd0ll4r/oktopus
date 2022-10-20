@@ -5,6 +5,7 @@ use diesel::PgConnection;
 use futures_util::StreamExt;
 use ipfs_api_backend_hyper::{IpfsApi, TryFromUri};
 use ipfs_indexer::cache::MimeTypeCache;
+use ipfs_indexer::hash::NormalizedAlternativeCid;
 use ipfs_indexer::ipfs::BlockLevelMetadata;
 use ipfs_indexer::prom::OutcomeLabel;
 use ipfs_indexer::queue::FileMessage;
@@ -315,7 +316,7 @@ where
         cid
     );
 
-    let (mime_type, file_size, sha256_hash, alternative_cids_binary, layers, dag_block_cids) =
+    let (mime_type, file_size, sha256_hash, alternative_cids_normalized, layers, dag_block_cids) =
         match download_file(ipfs_client, cid_parts, &cid).await {
             Ok(res) => match res {
                 Ok(metadata) => {
@@ -323,7 +324,7 @@ where
                         mime_type,
                         file_size,
                         sha256_hash,
-                        alternative_cids_binary,
+                        alternative_cids_normalized,
                         layers,
                         dag_block_cids,
                     } = metadata;
@@ -331,7 +332,7 @@ where
                         mime_type,
                         file_size,
                         sha256_hash,
-                        alternative_cids_binary,
+                        alternative_cids_normalized,
                         layers,
                         dag_block_cids,
                     )
@@ -363,7 +364,7 @@ where
         mime_type,
         file_size,
         sha256_hash,
-        alternative_cids_binary,
+        alternative_cids_normalized,
         layers,
         chrono::Utc::now(),
     )
@@ -393,7 +394,7 @@ struct FileMetadata {
     mime_type: &'static str,
     file_size: i64,
     sha256_hash: Vec<u8>,
-    alternative_cids_binary: Vec<Vec<u8>>,
+    alternative_cids_normalized: Vec<NormalizedAlternativeCid>,
     layers: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
     dag_block_cids: Vec<String>,
 }
@@ -435,9 +436,9 @@ where
             FailureReason::FailedToComputeAlternativeCids
         })?;
     debug!("{}: computed alternative CIDs {:?}", cid, alternative_cids);
-    let alternative_cids_binary = alternative_cids.binary_cidv1s().map_err(|err| {
+    let alternative_cids_normalized = alternative_cids.normalized_cids().map_err(|err| {
         warn!(
-            "unable to get binary CIDv1s for alternative CIDs {:?} for file {}: {:?}",
+            "unable to get normalized CIDs for alternative CIDs {:?} for file {}: {:?}",
             alternative_cids, cid, err
         );
         FailureReason::FailedToComputeAlternativeCids
@@ -497,7 +498,7 @@ where
         mime_type,
         file_size: file_size as i64,
         sha256_hash,
-        alternative_cids_binary,
+        alternative_cids_normalized,
         layers,
         dag_block_cids,
     }))
