@@ -29,8 +29,9 @@ cid = { version = "0.8.5", features = ["serde-codec"] }
 # Multihash, to parse hashes stored in the database
 multihash = { version = "0.16.3" }
 
-## MIME detector
+## MIME detectors
 tree_magic_mini = "3.0.3"
+magic = "0.13"
 
 ## Serde
 serde = "1.0.145"

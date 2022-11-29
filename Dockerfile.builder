@@ -3,18 +3,18 @@
 # Compiled binaries can be found in /ipfs-indexer/target/release/.
 # Sources are copied into /ipfs-indexer/.
 
-#FROM ubuntu:jammy AS chef
-#
-#RUN apt-get update && apt-get install -y \
-#  curl \
-#  build-essential
-#
-#ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-#RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > install-rust.sh
-#RUN chmod +x install-rust.sh
-#RUN ./install-rust.sh -y
+FROM ubuntu:jammy AS chef
 
-FROM rust:1-bullseye AS chef
+# Get build dependencies for Rust itself.
+RUN apt-get update && apt-get install -y \
+  curl \
+  build-essential
+
+# Install Rust.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > install-rust.sh
+RUN chmod +x install-rust.sh
+RUN ./install-rust.sh -y
 
 # Cargo-chef is used to build dependencies and cache them, for faster
 # incremental builds.
@@ -32,7 +32,8 @@ RUN apt-get update && apt-get install -y \
   libssl-dev \
   protobuf-compiler \
   pkg-config \
-  libpq-dev
+  libpq-dev \
+  libmagic-dev
 
 # Get a list of Rust dependencies to build.
 COPY --from=planner /ipfs-indexer/recipe.json recipe.json

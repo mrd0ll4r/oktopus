@@ -14,7 +14,8 @@ RUN groupadd -r ipfs \
 # Install OS-level dependencies.
 RUN apt-get update && apt-get install -y \
   libpq-dev \
-  shared-mime-info
+  shared-mime-info \
+  libmagic1
 
 # Enter our working directory.
 WORKDIR ipfs-indexer

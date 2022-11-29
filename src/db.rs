@@ -78,7 +78,8 @@ pub async fn async_upsert_successful_file(
     conn: Arc<Mutex<PgConnection>>,
     mime_cache: Arc<Mutex<MimeTypeCache>>,
     p_block_id: i64,
-    mime_type: &'static str,
+    freedesktop_mime_type: &'static str,
+    libmime_mime_type: String,
     file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids: Vec<NormalizedAlternativeCid>,
@@ -98,7 +99,8 @@ pub async fn async_upsert_successful_file(
             &mut conn,
             &mut cache,
             p_block_id,
-            mime_type,
+            freedesktop_mime_type,
+            libmime_mime_type,
             file_size,
             sha256_hash,
             alternative_cids,
@@ -247,7 +249,8 @@ pub fn upsert_successful_file(
     conn: &mut PgConnection,
     mime_cache: &mut MimeTypeCache,
     p_block_id: i64,
-    mime_type: &str,
+    freedesktop_mime_type: &str,
+    libmime_mime_type: String,
     file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids: Vec<NormalizedAlternativeCid>,
@@ -257,11 +260,18 @@ pub fn upsert_successful_file(
     debug!("upserting successful file for block {}", p_block_id);
 
     conn.transaction::<(), diesel::result::Error, _>(|conn| {
-        // Determine MIME type ID
-        let mime_type_id = mime_cache.lookup_or_insert(conn, mime_type)?;
+        // Determine MIME type IDs
+        let freedesktop_mime_type_id = mime_cache.lookup_or_insert(conn, freedesktop_mime_type)?;
+        let libmime_mime_type_id = mime_cache.lookup_or_insert(conn, &libmime_mime_type)?;
 
         // Insert MIME type and file size
-        insert_block_file_metadata_idempotent(conn, p_block_id, mime_type_id, file_size)?;
+        insert_block_file_metadata_idempotent(
+            conn,
+            p_block_id,
+            freedesktop_mime_type_id,
+            libmime_mime_type_id,
+            file_size,
+        )?;
 
         // Insert SHA256 hash
         insert_block_file_hash_idempotent(conn, p_block_id, HASH_TYPE_SHA2_256_ID, &sha256_hash)?;
@@ -299,18 +309,20 @@ pub fn upsert_successful_file(
 fn insert_block_file_metadata_idempotent(
     conn: &mut PgConnection,
     p_block_id: i64,
-    p_mime_type_id: i32,
+    p_freedesktop_mime_type_id: i32,
+    p_libmime_mime_type_id: i32,
     file_size: i64,
 ) -> Result<(), diesel::result::Error> {
     use crate::schema::block_file_metadata;
 
     let new_metadata = NewBlockFileMetadata {
         block_id: &p_block_id,
-        mime_type_id: &p_mime_type_id,
+        freedesktop_mime_type_id: &p_freedesktop_mime_type_id,
+        libmime_mime_type_id: &p_libmime_mime_type_id,
         file_size: &file_size,
     };
 
-    debug!("upserting block file metadata type {:?}", new_metadata);
+    debug!("upserting block file metadata {:?}", new_metadata);
     diesel::insert_into(block_file_metadata::table)
         .values(new_metadata)
         .on_conflict_do_nothing()

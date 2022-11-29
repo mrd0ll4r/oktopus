@@ -297,10 +297,6 @@ pub fn parse_cid_to_parts(c: &str) -> Result<CIDParts, cid::Error> {
     })
 }
 
-pub fn get_mime_type(bytes: &[u8]) -> &'static str {
-    tree_magic_mini::from_u8(bytes)
-}
-
 pub fn prometheus_address_from_env() -> anyhow::Result<SocketAddr> {
     dotenvy::dotenv().context("unable to read .env file")?;
 

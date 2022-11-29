@@ -156,20 +156,23 @@ pub struct NewMimeType<'a> {
     pub name: &'a str,
 }
 
+// This belongs_to mime_types twice, which is not supported via #[derive(Associations)], see https://github.com/diesel-rs/diesel/issues/2142.
 #[derive(Identifiable, Associations, Queryable, Debug, Clone, PartialEq, Eq)]
-#[diesel(table_name=block_file_metadata,primary_key(block_id),belongs_to(Block, foreign_key=block_id),belongs_to(MimeType, foreign_key=mime_type_id))]
+#[diesel(table_name=block_file_metadata,primary_key(block_id),belongs_to(Block, foreign_key=block_id))]
 pub struct BlockFileMetadata {
     pub block_id: i64,
-    pub mime_type_id: i32,
+    pub freedesktop_mime_type_id: i32,
     pub file_size: Option<i64>,
+    pub libmime_mime_type_id: i32,
 }
 
 #[derive(Insertable, Debug)]
 #[diesel(table_name=block_file_metadata)]
 pub struct NewBlockFileMetadata<'a> {
     pub block_id: &'a i64,
-    pub mime_type_id: &'a i32,
+    pub freedesktop_mime_type_id: &'a i32,
     pub file_size: &'a i64,
+    pub libmime_mime_type_id: &'a i32,
 }
 
 #[derive(

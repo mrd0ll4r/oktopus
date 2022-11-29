@@ -20,8 +20,9 @@ diesel::table! {
 diesel::table! {
     block_file_metadata (block_id) {
         block_id -> Int8,
-        mime_type_id -> Int4,
+        freedesktop_mime_type_id -> Int4,
         file_size -> Nullable<Int8>,
+        libmime_mime_type_id -> Int4,
     }
 }
 
@@ -117,7 +118,6 @@ diesel::joinable!(block_file_alternative_cids -> hash_types (hash_type_id));
 diesel::joinable!(block_file_hashes -> blocks (block_id));
 diesel::joinable!(block_file_hashes -> hash_types (hash_type_id));
 diesel::joinable!(block_file_metadata -> blocks (block_id));
-diesel::joinable!(block_file_metadata -> mime_types (mime_type_id));
 diesel::joinable!(block_links -> blocks (block_id));
 diesel::joinable!(block_links -> cids (referenced_cid_id));
 diesel::joinable!(block_stats -> blocks (block_id));

@@ -208,6 +208,7 @@ enum SkipReason {
 enum FailureReason {
     DownloadFailed,
     FailedToComputeAlternativeCids,
+    FailedToDetectLibmimeMimeType,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -241,6 +242,9 @@ impl OutcomeLabel for TaskOutcome {
                 FailureReason::DownloadFailed => "download_failed",
                 FailureReason::FailedToComputeAlternativeCids => {
                     "failed_to_compute_alternative_cids"
+                }
+                FailureReason::FailedToDetectLibmimeMimeType => {
+                    "failed_to_detect_libmime_mime_type"
                 }
             },
         }
@@ -316,44 +320,49 @@ where
         cid
     );
 
-    let (mime_type, file_size, sha256_hash, alternative_cids_normalized, layers, dag_block_cids) =
-        match download_file(ipfs_client, cid_parts, &cid).await {
-            Ok(res) => match res {
-                Ok(metadata) => {
-                    let FileMetadata {
-                        mime_type,
-                        file_size,
-                        sha256_hash,
-                        alternative_cids_normalized,
-                        layers,
-                        dag_block_cids,
-                    } = metadata;
-                    (
-                        mime_type,
-                        file_size,
-                        sha256_hash,
-                        alternative_cids_normalized,
-                        layers,
-                        dag_block_cids,
-                    )
-                }
-                Err(skip_reason) => return Skipped(skip_reason),
-            },
-            Err(err) => {
-                db::async_insert_dag_download_failure(
-                    db_conn.clone(),
-                    db_block.id,
-                    chrono::Utc::now(),
+    let (
+        freedesktop_mime_type,
+        libmime_mime_type,
+        file_size,
+        sha256_hash,
+        alternative_cids_normalized,
+        layers,
+        dag_block_cids,
+    ) = match download_file(ipfs_client, cid_parts, &cid).await {
+        Ok(res) => match res {
+            Ok(metadata) => {
+                let FileMetadata {
+                    freedesktop_mime_type: mime_type,
+                    libmime_mime_type,
+                    file_size,
+                    sha256_hash,
+                    alternative_cids_normalized,
+                    layers,
+                    dag_block_cids,
+                } = metadata;
+                (
+                    mime_type,
+                    libmime_mime_type,
+                    file_size,
+                    sha256_hash,
+                    alternative_cids_normalized,
+                    layers,
+                    dag_block_cids,
                 )
+            }
+            Err(skip_reason) => return Skipped(skip_reason),
+        },
+        Err(err) => {
+            db::async_insert_dag_download_failure(db_conn.clone(), db_block.id, chrono::Utc::now())
                 .await
                 .expect("unable to insert download failure into database");
-                debug!("{}: marked failed in database", cid);
+            debug!("{}: marked failed in database", cid);
 
-                redis_mark_failed(&cid, redis_conn).await;
+            redis_mark_failed(&cid, redis_conn).await;
 
-                return Failed(err);
-            }
-        };
+            return Failed(err);
+        }
+    };
 
     // Insert into database
     debug!("{}: inserting successful file into database", cid);
@@ -361,7 +370,8 @@ where
         db_conn,
         mime_cache,
         db_block.id,
-        mime_type,
+        freedesktop_mime_type,
+        libmime_mime_type,
         file_size,
         sha256_hash,
         alternative_cids_normalized,
@@ -391,7 +401,8 @@ where
 }
 
 struct FileMetadata {
-    mime_type: &'static str,
+    freedesktop_mime_type: &'static str,
+    libmime_mime_type: String,
     file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids_normalized: Vec<NormalizedAlternativeCid>,
@@ -423,8 +434,22 @@ where
     let file_size = file_data.len();
 
     // Compute heuristics, hash, alternative CIDs
-    let mime_type = ipfs_indexer::get_mime_type(&file_data);
-    debug!("{}: detected MIME type {}", cid, mime_type);
+    let freedesktop_mime_type = get_freedesktop_mime_type(&file_data);
+
+    let libmime_mime_type = get_libmime_mime_type_async(file_data.clone())
+        .await
+        .map_err(|err| {
+            warn!(
+                "unable to detect libmime MIME type for file {}: {:?}",
+                cid, err
+            );
+            FailureReason::FailedToDetectLibmimeMimeType
+        })?;
+
+    debug!(
+        "{}: detected MIME types {} (freedesktop), {} (libmime)",
+        cid, freedesktop_mime_type, libmime_mime_type
+    );
     let sha256_hash = hash::compute_sha256(&file_data);
     let alternative_cids = hash::AlternativeCids::for_bytes(ipfs_client.clone(), file_data)
         .await
@@ -495,13 +520,54 @@ where
     }
 
     Ok(Ok(FileMetadata {
-        mime_type,
+        freedesktop_mime_type,
+        libmime_mime_type,
         file_size: file_size as i64,
         sha256_hash,
         alternative_cids_normalized,
         layers,
         dag_block_cids,
     }))
+}
+
+fn set_up_libmime_detector() -> anyhow::Result<magic::Cookie> {
+    // Create configuration
+    let cookie = magic::Cookie::open(
+        // Treat some OS errors as real errors instead of hiding them somewhere.
+        magic::CookieFlags::ERROR |
+            // Return a MIME type string.
+            magic::CookieFlags::MIME_TYPE,
+    )
+    .context("unable to set up libmime detector")?;
+
+    // Load the default database.
+    cookie
+        .load::<&str>(&[])
+        .context("unable to load libmime database")?;
+
+    Ok(cookie)
+}
+
+pub fn get_freedesktop_mime_type(bytes: &[u8]) -> &'static str {
+    tree_magic_mini::from_u8(bytes)
+}
+
+pub async fn get_libmime_mime_type_async(bytes: Vec<u8>) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || get_libmime_mime_type(bytes))
+        .await
+        .unwrap()
+}
+
+pub fn get_libmime_mime_type(bytes: Vec<u8>) -> anyhow::Result<String> {
+    // Set up libmime detector
+    let libmime_detector =
+        set_up_libmime_detector().context("unable to set up libmime detector")?;
+
+    let libmime_mime_type = libmime_detector
+        .buffer(&bytes)
+        .context("failed to detect mime type")?;
+
+    Ok(libmime_mime_type)
 }
 
 async fn redis_mark_failed(cid: &str, redis_conn: &mut RedisConnection) {
