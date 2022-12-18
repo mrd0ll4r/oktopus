@@ -130,14 +130,12 @@ services:
     image: "ipfs-indexer-cid-worker:latest"
 
   daemon01:
-    image: "ipfs/kubo:v0.15.0"
+    image: "ipfs/kubo:v0.17.0"
     command: daemon --migrate=true --agent-version-suffix=docker --enable-gc
     restart: unless-stopped
     volumes:
       - ipfs_01_path:/data/ipfs
       - ./001_configure_ipfs.sh:/container-init.d/001_configure_ipfs.sh
-    environment:
-      - IPFS_PATH=/data/ipfs
     ports:
       # Swarm listens on all interfaces, so is remotely reachable.
       - "4001:4001/tcp"
@@ -146,18 +144,17 @@ services:
       - "127.0.0.1:5001:5001"
 
   daemon02:
-    image: "ipfs/kubo:v0.15.0"
+    image: "ipfs/kubo:v0.17.0"
     command: daemon --migrate=true --agent-version-suffix=docker --enable-gc
     restart: unless-stopped
     volumes:
       - ipfs_02_path:/data/ipfs
       - ./001_configure_ipfs.sh:/container-init.d/001_configure_ipfs.sh
-    environment:
-      - IPFS_PATH=/data/ipfs
+      - ./002_configure_second_daemon_addresses.sh:/container-init.d/002_configure_second_daemon_addresses.sh
     ports:
       # Swarm listens on all interfaces, so is remotely reachable.
-      - "4002:4001/tcp"
-      - "4002:4001/udp"
+      - "4002:4002/tcp"
+      - "4002:4002/udp"
       # API port, which includes admin operations, so you probably don't want this remotely accessible.
       - "127.0.0.1:5002:5001"
 
