@@ -10,5 +10,5 @@ WHERE c.block_id = b.id
   AND f.block_id = b.id
   AND h.block_id = b.id
   AND h.hash_type_id = 1 -- SHA2_256
-  AND m.id = f.mime_type_id
+  AND m.id = f.libmime_mime_type_id
   AND (m.name ~ 'image/.*' OR m.name ~ 'video/.*');
