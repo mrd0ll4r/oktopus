@@ -200,18 +200,19 @@ TODO: the message types (i.e., task definitions) are not up-to-date.
 - Job: index directory, add tasks for entries
 - Fast LS -> no information about whether the target is a directory or a file
 - Algorithm:
-  1. (optimization) Check Redis `hamtshards` for CID -> skip to 9
-  2. (optimization) Check Redis `failed_hamtshards` counter -> if >= THRESHOLD skip to 9
-  3. Check DB for failed downloads counter -> if >= THRESHOLD skip to 9
-  4. (optimization) Check DB for directory entries -> skip to 8
-  5. Fast LS, maybe also get block stats of DAG links (because they should be cached now?)
-  6. In one transaction:
+  1. (optimization) Check Redis `hamtshards` for CID -> skip to 10
+  2. (optimization) Check Redis `failed_hamtshards` counter -> if >= THRESHOLD skip to 10
+  3. Check DB for failed downloads counter -> if >= THRESHOLD skip to 10
+  4. (optimization) Check DB for directory entries -> skip to 9
+  5. Fast LS and get block stats of all inner DAG nodes (because they should be cached at this point)
+  6. If anything failed: Record in DB, record in Redis, requeue to RabbitMQ, return
+  7. In one transaction:
      1. Insert CIDs for entries
      2. Insert directory entries (and block stat about DAG links?)
-  7. (optimization, maybe) Insert CIDs of DAG-references that are `HAMTShard`s into Redis `hamtshards`?
-  8. Push entries to `blocks`
-  9. (optimization) Insert CID into Redis `hamtshards`, `blocks`, and `cids`
-  10. ACK to RabbitMQ
+  8. (optimization, maybe) Insert CIDs of DAG-references that are `HAMTShard`s into Redis `hamtshards`?
+  9. Push entries to `blocks`
+  10. (optimization) Insert CID into Redis `hamtshards`, `blocks`, and `cids`
+  11. ACK to RabbitMQ
 - (optimization) Marginally faster on the daemon that indexed the block, but probably doesn't matter
 
 ### Components

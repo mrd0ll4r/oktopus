@@ -291,12 +291,35 @@ where
             // If not present, download and index
             debug!("{}: doing fast ls", cid);
 
-            let entries =
-                match fast_index_and_insert(redis_conn, db_conn, ipfs_client, db_block, &cid).await
-                {
+            let entries = match fast_index_and_insert(
+                redis_conn,
+                db_conn.clone(),
+                ipfs_client,
+                db_block.clone(),
+                &cid,
+                &cid_parts,
+            )
+            .await
+            {
+                Ok(entries) => match entries {
                     Ok(entries) => entries,
-                    Err(res) => return Failed(res),
-                };
+                    Err(res) => return Skipped(res),
+                },
+                Err(res) => {
+                    db::async_insert_dag_download_failure(
+                        db_conn.clone(),
+                        db_block.id,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                    .expect("unable to insert download failure into database");
+                    debug!("{}: marked failed in database", cid);
+
+                    redis_mark_failed(&cid, redis_conn).await;
+
+                    return Failed(res);
+                }
+            };
             debug!(
                 "{}: successfully fast-ls'ed and inserted links into database: {:?}",
                 cid, entries
@@ -351,7 +374,8 @@ async fn fast_index_and_insert<T>(
     ipfs_client: Arc<T>,
     db_block: Block,
     cid: &String,
-) -> Result<Vec<(DirectoryEntry, Cid, Block)>, FailureReason>
+    cid_parts: &CIDParts,
+) -> Result<Result<Vec<(DirectoryEntry, Cid, Block)>, SkipReason>, FailureReason>
 where
     T: IpfsApi + Sync,
 {
@@ -374,6 +398,36 @@ where
     };
     debug!("{}: got directory listing {:?}", cid, listing);
 
+    let listing_cids = listing
+        .iter()
+        .map(|(_, _, cidparts)| cidparts.clone())
+        .collect();
+
+    // Download block data of entire referenced DAG, in layers.
+    // Skip directory entries. This is important, since we will submit those as block tasks later on anyway.
+    // The whole point of fast-ls'ing is to _not_ download the linked files.
+    debug!(
+        "{}: downloading DAG metadata excluding directory entries",
+        cid
+    );
+    let layers = match ipfs::download_dag_block_metadata(
+        cid,
+        cid_parts.codec,
+        Some(listing_cids),
+        ipfs_client.clone(),
+    )
+    .await
+    .map_err(|err| {
+        debug!("{}: unable to get metadata referenced DAG: {:?}", cid, err);
+        FailureReason::DownloadFailed
+    })? {
+        Ok(layers) => layers,
+        Err(_) => {
+            debug!("{}: failed to parse referenced CID of child blocks", cid);
+            return Ok(Err(SkipReason::UnableToParseReferencedCids));
+        }
+    };
+
     // We don't have block-level metadata, so we augment this with None
     let entries = listing
         .into_iter()
@@ -386,6 +440,7 @@ where
         db_conn.clone(),
         db_block.id,
         entries,
+        Some(layers),
         chrono::Utc::now(),
     )
     .await
@@ -400,7 +455,7 @@ where
         })
         .collect();
 
-    Ok(entries)
+    Ok(Ok(entries))
 }
 
 async fn redis_mark_failed(cid: &str, redis_conn: &mut RedisConnection) {

@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use ipfs_api_backend_hyper::{IpfsApi, TryFromUri};
 use ipfs_indexer::cache::MimeTypeCache;
 use ipfs_indexer::hash::NormalizedAlternativeCid;
-use ipfs_indexer::ipfs::BlockLevelMetadata;
+use ipfs_indexer::ipfs::{BlockLevelMetadata, ParseReferencedCidFailed};
 use ipfs_indexer::prom::OutcomeLabel;
 use ipfs_indexer::queue::FileMessage;
 use ipfs_indexer::redis::RedisConnection;
@@ -471,53 +471,26 @@ where
 
     // Download block data of entire referenced DAG, in layers.
     debug!("{}: downloading DAG metadata", cid);
-    let mut layers = Vec::new();
-    let mut dag_block_cids = Vec::new();
-    let root_metadata =
-        ipfs::query_ipfs_for_block_level_data(&cid, cid_parts.codec, ipfs_client.clone())
+    let layers =
+        match ipfs::download_dag_block_metadata(cid, cid_parts.codec, None, ipfs_client.clone())
             .await
             .map_err(|err| {
-                debug!("{}: unable to get metadata for root block: {:?}", cid, err);
-                FailureReason::DownloadFailed
-            })?
-            .expect("unable to parse children CIDs of block already present in database");
-    debug!("{}: got root metadata {:?}", cid, root_metadata);
-    let mut current_layer = Some(vec![root_metadata.links]);
-    while let Some(layer) = current_layer.take() {
-        if layer.is_empty() {
-            break;
-        }
-        let mut wip_layer = Vec::new();
-        for (_, _, child_cidparts) in layer.into_iter().flatten() {
-            let child_cid = format!("{}", child_cidparts.cid);
-            dag_block_cids.push(child_cid.clone());
-            let child_metadata = match ipfs::query_ipfs_for_block_level_data(
-                &child_cid,
-                child_cidparts.codec,
-                ipfs_client.clone(),
-            )
-            .await
-            .map_err(|err| {
-                debug!("{}: unable to get metadata for child block: {:?}", cid, err);
+                debug!("{}: unable to get metadata referenced DAG: {:?}", cid, err);
                 FailureReason::DownloadFailed
             })? {
-                Ok(metadata) => metadata,
-                Err(_) => {
-                    debug!("{}: failed to parse CID of child blocks", cid);
-                    return Ok(Err(SkipReason::UnableToParseReferencedCids));
-                }
-            };
-            wip_layer.push((child_cidparts, child_metadata));
-        }
+            Ok(layers) => layers,
+            Err(_) => {
+                debug!("{}: failed to parse referenced CID of child blocks", cid);
+                return Ok(Err(SkipReason::UnableToParseReferencedCids));
+            }
+        };
 
-        current_layer = Some(
-            wip_layer
-                .iter()
-                .map(|(_, metadata)| metadata.links.clone())
-                .collect(),
-        );
-        layers.push(wip_layer);
-    }
+    let dag_block_cids = layers
+        .iter()
+        .map(|l| l.iter())
+        .flatten()
+        .map(|(child_cidparts, _)| format!("{}", child_cidparts.cid))
+        .collect();
 
     Ok(Ok(FileMetadata {
         freedesktop_mime_type,

@@ -49,6 +49,7 @@ pub async fn async_upsert_successful_directory(
     conn: Arc<Mutex<PgConnection>>,
     p_block_id: i64,
     entries: Vec<(String, i64, CIDParts, Option<BlockLevelMetadata>)>,
+    additional_dag_nodes: Option<Vec<Vec<(CIDParts, BlockLevelMetadata)>>>,
     ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<
     Vec<(
@@ -67,7 +68,7 @@ pub async fn async_upsert_successful_directory(
     tokio::task::spawn_blocking(move || {
         let mut conn = conn.lock().unwrap();
 
-        upsert_successful_directory(&mut conn, p_block_id, entries, ts)
+        upsert_successful_directory(&mut conn, p_block_id, entries, additional_dag_nodes, ts)
     })
     .await
     .map_err(AsyncDBError::Runtime)?
@@ -387,6 +388,7 @@ pub fn upsert_successful_directory(
     conn: &mut PgConnection,
     p_block_id: i64,
     entries: Vec<(String, i64, CIDParts, Option<BlockLevelMetadata>)>,
+    additional_dag_nodes: Option<Vec<Vec<(CIDParts, BlockLevelMetadata)>>>,
     ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<
     Vec<(
@@ -446,6 +448,25 @@ pub fn upsert_successful_directory(
         debug!("upserted directory entries {:?}", directory_entries);
 
         let directory_entries = directory_entries?;
+
+        // For each dag layer:
+        for layer in additional_dag_nodes.unwrap_or_else(Vec::new).into_iter() {
+            // Insert successful blocks
+            // TODO there is an optimization to be made here if we iterate in reverse and remember
+            // the database block IDs of the previous layer.
+            for (cidparts, metadata) in layer {
+                let (db_block, _) = upsert_block_and_cid(conn, cidparts)?;
+
+                upsert_successful_block(
+                    conn,
+                    db_block.id,
+                    metadata.block_size,
+                    metadata.unixfs_type_id,
+                    metadata.links,
+                    ts,
+                )?;
+            }
+        }
 
         // Insert successful download
         insert_download_success_idempotent(conn, p_block_id, DOWNLOAD_TYPE_DAG_ID, ts)?;

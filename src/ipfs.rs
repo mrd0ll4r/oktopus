@@ -1,12 +1,78 @@
-use crate::{models, parse_cid_to_parts, CIDParts};
+use crate::{ipfs, models, parse_cid_to_parts, CIDParts};
 use anyhow::{anyhow, Context};
 use futures_util::TryStreamExt;
 use ipfs_api_backend_hyper::response::IpfsHeader;
 use ipfs_api_backend_hyper::IpfsApi;
 use log::debug;
 use prost::Message;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
+
+pub async fn download_dag_block_metadata<T>(
+    cid: &str,
+    codec: u64,
+    cids_to_skip: Option<Vec<CIDParts>>,
+    ipfs_client: Arc<T>,
+) -> anyhow::Result<Result<Vec<Vec<(CIDParts, BlockLevelMetadata)>>, ParseReferencedCidFailed>>
+where
+    T: IpfsApi + Sync,
+{
+    debug!(
+        "downloading dag block metadata for CID {} with skip list {:?}",
+        cid, cids_to_skip
+    );
+
+    let skip_set = cids_to_skip
+        .unwrap_or_else(Vec::new)
+        .into_iter()
+        .map(|c| c.cid)
+        .collect::<HashSet<_>>();
+    let mut layers = Vec::new();
+    let root_metadata = query_ipfs_for_block_level_data(&cid, codec, ipfs_client.clone())
+        .await?
+        .expect("unable to parse children CIDs of block already present in database");
+    debug!("{}: got root metadata {:?}", cid, root_metadata);
+
+    let mut current_layer = Some(vec![root_metadata.links]);
+    while let Some(layer) = current_layer.take() {
+        if layer.is_empty() {
+            break;
+        }
+        let mut wip_layer = Vec::new();
+        for (_, _, child_cidparts) in layer.into_iter().flatten() {
+            if skip_set.contains(&child_cidparts.cid) {
+                continue;
+            }
+
+            let child_cid = format!("{}", child_cidparts.cid);
+            let child_metadata = match ipfs::query_ipfs_for_block_level_data(
+                &child_cid,
+                child_cidparts.codec,
+                ipfs_client.clone(),
+            )
+            .await?
+            {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    debug!("{}: failed to parse referenced CID of child blocks", cid);
+                    return Ok(Err(()));
+                }
+            };
+            wip_layer.push((child_cidparts, child_metadata));
+        }
+
+        current_layer = Some(
+            wip_layer
+                .iter()
+                .map(|(_, metadata)| metadata.links.clone())
+                .collect(),
+        );
+        layers.push(wip_layer);
+    }
+
+    Ok(Ok(layers))
+}
 
 pub async fn query_ipfs_for_file_data<T>(c: &str, client: Arc<T>) -> anyhow::Result<Vec<u8>>
 where

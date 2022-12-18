@@ -591,6 +591,7 @@ where
         db_conn.clone(),
         db_block.id,
         entries,
+        None,
         chrono::Utc::now(),
     )
     .await
@@ -650,6 +651,7 @@ where
         db_conn.clone(),
         db_block.id,
         entries,
+        None,
         chrono::Utc::now(),
     )
     .await
