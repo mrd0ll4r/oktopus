@@ -218,6 +218,7 @@ services:
       # https://grafana.com/plugins/vonage-status-panel
       # https://grafana.com/plugins/yesoreyeram-boomtable-panel
       GF_INSTALL_PLUGINS: "flant-statusmap-panel,grafana-piechart-panel"
+
   prometheus:
     # https://hub.docker.com/r/prom/prometheus/tags
     image: prom/prometheus:v2.39.0
@@ -229,6 +230,7 @@ services:
     volumes:
       - prometheus_data:/prometheus
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
   node-exporter:
     command:
       - '--path.procfs=/host/proc'
@@ -244,18 +246,6 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/rootfs:ro
-  cadvisor:
-    expose:
-      - 8080
-    # https://hub.docker.com/r/google/cadvisor/tags
-    image: google/cadvisor:v0.33.0
-    restart: unless-stopped
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:rw
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      - /cgroup:/cgroup:ro #doesn't work on MacOS only for Linux
 
 volumes:
   prometheus_data:
