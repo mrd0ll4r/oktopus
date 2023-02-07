@@ -281,7 +281,8 @@ where
 
     // Check cumulative file size
     let approx_size = db_links.iter().map(|l| l.size).sum::<i64>() as u64;
-    if approx_size > file_size_limit {
+    // We give it some wiggle room because we can't trust the link sizes exactly.
+    if approx_size > (file_size_limit * 1.2_f64 as u64) {
         return Skipped(SkipReason::FileSizeLimitExceeded);
     }
 
