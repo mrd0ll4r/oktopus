@@ -1,3 +1,5 @@
 /target
 /out
+/docker-compose/worker_01_temp_file_storage
+/docker-compose/worker_02_temp_file_storage
 *.cids

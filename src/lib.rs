@@ -362,6 +362,14 @@ pub fn block_worker_ipfs_timeout_secs_from_env() -> anyhow::Result<u64> {
 }
 
 pub fn file_worker_ipfs_timeout_secs_from_env() -> anyhow::Result<u64> {
+    get_u64_from_env("INDEXER_FILE_DAG_BLOCK_DOWNLOAD_TIMEOUT_SECS")
+}
+
+pub fn file_worker_head_timeout_secs_from_env() -> anyhow::Result<u64> {
+    get_u64_from_env("INDEXER_FILE_HEAD_TIMEOUT_SECS")
+}
+
+pub fn file_worker_download_timeout_secs_from_env() -> anyhow::Result<u64> {
     get_u64_from_env("INDEXER_FILE_DOWNLOAD_TIMEOUT_SECS")
 }
 

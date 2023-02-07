@@ -3,11 +3,15 @@ use anyhow::{anyhow, Context};
 use futures_util::TryStreamExt;
 use ipfs_api_backend_hyper::response::IpfsHeader;
 use ipfs_api_backend_hyper::IpfsApi;
-use log::debug;
+use log::{debug, trace, warn};
 use prost::Message;
+use reqwest::Url;
+use std::borrow::BorrowMut;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 
 pub async fn download_dag_block_metadata<T>(
     cid: &str,
@@ -74,24 +78,111 @@ where
     Ok(Ok(layers))
 }
 
-pub async fn query_ipfs_for_file_data<T>(c: &str, client: Arc<T>) -> anyhow::Result<Vec<u8>>
-where
-    T: IpfsApi + Sync,
-{
-    debug!("calling ipfs cat for CID {}", c);
-
-    let _timer = crate::prom::IPFS_METHOD_CALL_DURATIONS
-        .get_metric_with_label_values(&["cat"])
-        .unwrap()
-        .start_timer();
-    client
-        .cat(c)
-        .map_ok(|chunk| chunk.to_vec())
-        .try_concat()
-        .await
-        .map_err(|err| anyhow!("{}", err))
+pub fn build_gateway_url(base_url: &Url, cid: &str) -> Url {
+    let mut url = base_url.clone();
+    url.set_path(format!("/ipfs/{}", cid).as_str());
+    url
 }
 
+// Returns Ok(Ok(size)) if the download succeeded, Ok(Err(size)) if it was skipped due to being too
+// large, and Err(err) if it failed.
+pub async fn query_ipfs_for_file_data(
+    c: &str,
+    client: reqwest::Client,
+    gateway_base_url: &Url,
+    file_size_limit: u64,
+    head_timeout: Duration,
+    download_timeout: Duration,
+    file_path: &Path,
+) -> anyhow::Result<std::result::Result<i64, i64>> {
+    let url = build_gateway_url(gateway_base_url, c);
+    debug!("{}: requesting via IPFS gateway at {}...", c, url);
+
+    let _timer = crate::prom::IPFS_METHOD_CALL_DURATIONS
+        .get_metric_with_label_values(&["gateway_get"])
+        .unwrap()
+        .start_timer();
+
+    // Start request, wait for response headers.
+    // This usually means that IPFS was able to find the data (or at least the first block or layer)
+    let response = {
+        let _head_timer = crate::prom::IPFS_METHOD_CALL_DURATIONS
+            .get_metric_with_label_values(&["gateway_head"])
+            .unwrap()
+            .start_timer();
+
+        let request = client.get(url).send();
+        match tokio::time::timeout(head_timeout, request).await {
+            Ok(result) => result
+                .context("unable to perform request")?
+                .error_for_status()
+                .context("request failed")?,
+            Err(_) => return Err(anyhow!("resolve/HEAD timeout")),
+        }
+    };
+    debug!("{}: got initial response from gateway: {:?}", c, response);
+    let advertised_file_size = response.content_length();
+    if let Some(size) = advertised_file_size {
+        if size > file_size_limit {
+            return Ok(Err(size as i64));
+        }
+    }
+
+    debug!("{}: starting download via gateway", c);
+    let file_size = perform_gateway_download(c, response, download_timeout, file_path)
+        .await
+        .map_err(|e| {
+            // Try to remove the file if it exists already, on a best-effort basis.
+            if let Err(e) = std::fs::remove_file(file_path) {
+                warn!(
+                    "{}: unable to remove incomplete temp file {:?}: {:?}",
+                    c, file_path, e
+                )
+            }
+
+            e
+        })?;
+
+    Ok(Ok(file_size))
+}
+
+async fn perform_gateway_download(
+    c: &str,
+    mut response: reqwest::Response,
+    download_timeout: Duration,
+    file_path: &Path,
+) -> anyhow::Result<i64> {
+    let mut file = tokio::fs::File::create(file_path)
+        .await
+        .context("unable to create file")?;
+    let download_deadline = tokio::time::Instant::now() + download_timeout;
+    let mut n = 0;
+
+    loop {
+        match tokio::time::timeout_at(download_deadline, response.chunk()).await {
+            Ok(result) => {
+                if let Some(mut chunk) = result.context("unable to read response body")? {
+                    trace!("{}: received chunk of {} bytes", c, chunk.len());
+                    n += chunk.len() as i64;
+                    file.write_all_buf(chunk.borrow_mut())
+                        .await
+                        .context("unable to write temp file")?;
+                } else {
+                    // HTTP response completely consumed
+                    break;
+                }
+            }
+            Err(_) => {
+                // Timeout
+                return Err(anyhow!("download/GET timeout"));
+            }
+        }
+    }
+
+    Ok(n)
+}
+
+// TODO correctly propagate failing to parse referenced CIDs
 pub async fn query_ipfs_for_directory_listing<T>(
     cid: &str,
     ipfs_client: Arc<T>,

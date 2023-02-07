@@ -1,5 +1,5 @@
 use crate::TaskOutcome::{Done, Failed, Skipped};
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use clap::{arg, Command};
 use diesel::PgConnection;
 use futures_util::StreamExt;
@@ -17,6 +17,9 @@ use ipfs_indexer::{
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
 use log::{debug, info, warn};
+use reqwest::{Client, Url};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,36 +35,113 @@ Takes file-like blocks from an AMQP queue, downloads them, computes heuristics a
 Static configuration is taken from a .env file, see the README for more information.")
         .arg(arg!(--daemon <ADDRESS> "specifies the API URL of the IPFS daemon to use")
             .default_value("http://127.0.0.1:5001"))
+        .arg(arg!(--gateway <ADDRESS> "specifies the gateway URL of the IPFS daemon to use")
+            .default_value("http://127.0.0.1:8080"))
         .get_matches();
 
     let failure_threshold = ipfs_indexer::failed_file_downloads_threshold_from_env()
         .context("unable to determine failed DAG downloads threshold")?;
-    let download_timeout = ipfs_indexer::file_worker_ipfs_timeout_secs_from_env()
-        .context("unable to determine download timeout")?;
+    let block_download_timeout = ipfs_indexer::file_worker_ipfs_timeout_secs_from_env()
+        .context("unable to determine block download timeout")?;
+    let file_head_timeout = ipfs_indexer::file_worker_head_timeout_secs_from_env()
+        .context("unable to determine file HEAD timeout")?;
+    let file_download_timeout = ipfs_indexer::file_worker_download_timeout_secs_from_env()
+        .context("unable to determine file download timeout")?;
     let file_size_limit =
         ipfs_indexer::file_size_limit_from_env().context("unable to determine file size limit")?;
+
+    // Create and/or clear temp storage directory
+    let temp_storage_path = Path::new("/ipfs-indexer/tmp");
+    ensure!(
+        temp_storage_path.is_dir(),
+        "temporary file storage directory missing"
+    );
+    // Test if we can write to it
+    let mut tmp_file_path = temp_storage_path.to_path_buf();
+    tmp_file_path.push("test.foo");
+    std::fs::File::create(&tmp_file_path)
+        .context("unable to write to temporary file storage directory")?;
+    std::fs::remove_file(&tmp_file_path)
+        .context("unable to write to temporary file storage directory")?;
+    for entry in std::fs::read_dir(temp_storage_path)
+        .context("unable to list temporary file storage directory")?
+    {
+        let entry = entry.context("unable to get directory entry")?;
+        let path = entry.path();
+        if path.is_dir() {
+            warn!(
+                "temporary file storage directory contains directory {:?}, ignoring...",
+                path
+            );
+        } else {
+            debug!("removing file from temporary storage directory: {:?}", path);
+            std::fs::remove_file(path)
+                .context("unable to remove file from temporary storage directory")?;
+        }
+    }
+    let temp_storage_path = Arc::new(temp_storage_path.to_path_buf());
 
     let daemon_uri = matches
         .get_one::<String>("daemon")
         .expect("missing required daemon arg");
+    let gateway_uri = matches
+        .get_one::<String>("gateway")
+        .expect("missing required gateway arg");
+    let gateway_url = Url::parse(gateway_uri).context("unable to parse gateway URL")?;
 
     debug!("connecting to IPFS daemon...");
-    let client: IpfsApiClient = ipfs_api_backend_hyper::IpfsClient::from_str(daemon_uri)
-        .context("unable to create client")?;
-    let client_with_timeout = ipfs_api_backend_hyper::BackendWithGlobalOptions::new(
-        client,
+    let api_client: IpfsApiClient = ipfs_api_backend_hyper::IpfsClient::from_str(daemon_uri)
+        .context("unable to create IPFS API client")?;
+    let api_client_with_timeout = ipfs_api_backend_hyper::BackendWithGlobalOptions::new(
+        api_client,
         ipfs_api_backend_hyper::GlobalOptions {
             offline: None,
-            timeout: Some(Duration::from_secs(download_timeout)),
+            timeout: Some(Duration::from_secs(block_download_timeout)),
         },
     );
-    let client = Arc::new(client_with_timeout);
-    let daemon_id = client.id(None).await.context("unable to query IPFS API")?;
+    let ipfs_api_download_client = Arc::new(api_client_with_timeout);
+    let daemon_id = ipfs_api_download_client
+        .id(None)
+        .await
+        .context("unable to query IPFS API")?;
+    let ipfs_api_upload_client: Arc<IpfsApiClient> = Arc::new(
+        ipfs_api_backend_hyper::IpfsClient::from_str(daemon_uri)
+            .context("unable to create IPFS API client")?,
+    );
+    let _ = ipfs_api_upload_client
+        .id(None)
+        .await
+        .context("unable to query IPFS API")?;
     info!(
         "connected to IPFS daemon version {} at {} with ID {:?}",
         daemon_id.agent_version, daemon_uri, daemon_id.id
     );
     let daemon_uri = Arc::new(daemon_uri.clone());
+
+    // Connect to gateway, HEAD something to test
+    debug!("connecting to IPFS gateway...");
+    let gateway_client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .context("unable to build HTTP client")?;
+    // This is the README file shipped with every kubo instance.
+    let example_content_url = ipfs::build_gateway_url(
+        &gateway_url,
+        "QmPZ9gcCEpqKTo6aq61g2nXGUhM4iCL3ewB6LDXZCtioEB",
+    );
+    let readme_content = gateway_client
+        .get(example_content_url)
+        .send()
+        .await
+        .context("unable to fetch example content from gateway")?
+        .bytes()
+        .await
+        .context("unable to read example content from gateway")?;
+    ensure!(
+        readme_content.len() == 1091,
+        "size mismatch for example content"
+    );
+    info!("connected to gateway at {}", gateway_url);
 
     debug!("setting up worker connections");
     let WorkerConnections {
@@ -100,6 +180,8 @@ Static configuration is taken from a .env file, see the README for more informat
         .context("unable to subscribe to directories queue")?;
     info!("set up RabbitMQ channels and consumers");
 
+    let currently_running_tasks = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+
     info!("listening for tasks");
     while let Some(delivery) = files_consumer.next().await {
         let delivery = delivery.expect("error in consumer");
@@ -109,18 +191,30 @@ Static configuration is taken from a .env file, see the README for more informat
         let daemon_uri = daemon_uri.clone();
         let db_conn = db_conn.clone();
         let mime_cache = mime_cache.clone();
-        let ipfs_client = client.clone();
+        let ipfs_api_download_client = ipfs_api_download_client.clone();
+        let ipfs_api_upload_client = ipfs_api_upload_client.clone();
+        let gateway_client = gateway_client.clone();
+        let gateway_base_url = gateway_url.clone();
+        let temp_storage_path = temp_storage_path.clone();
+        let currently_running_tasks = currently_running_tasks.clone();
 
         tokio::spawn(async move {
             handle_delivery(
                 delivery,
+                currently_running_tasks,
                 daemon_uri,
                 redis_conn,
                 db_conn,
                 mime_cache,
-                ipfs_client,
+                ipfs_api_download_client,
+                ipfs_api_upload_client,
                 failure_threshold,
+                gateway_client,
+                gateway_base_url,
                 file_size_limit,
+                Duration::from_secs(file_head_timeout),
+                Duration::from_secs(file_download_timeout),
+                temp_storage_path,
             )
             .await
         });
@@ -129,16 +223,24 @@ Static configuration is taken from a .env file, see the README for more informat
     Ok(())
 }
 
-async fn handle_delivery<T>(
+async fn handle_delivery<S, T>(
     delivery: Delivery,
+    currently_running_tasks: Arc<tokio::sync::Mutex<HashSet<String>>>,
     daemon_uri: Arc<String>,
     mut redis_conn: RedisConnection,
     db_conn: Arc<Mutex<PgConnection>>,
     mime_cache: Arc<Mutex<MimeTypeCache>>,
-    ipfs_client: Arc<T>,
+    ipfs_api_download_client: Arc<T>,
+    ipfs_api_upload_client: Arc<S>,
     failure_threshold: u64,
+    gateway_client: reqwest::Client,
+    gateway_base_url: Url,
     file_size_limit: u64,
+    download_head_timeout: Duration,
+    download_get_timeout: Duration,
+    temp_file_dir: Arc<PathBuf>,
 ) where
+    S: IpfsApi + Sync,
     T: IpfsApi + Sync,
 {
     let Delivery {
@@ -158,6 +260,21 @@ async fn handle_delivery<T>(
             return;
         }
     };
+    let cid = format!("{}", msg.cid.cid);
+
+    // Check if we're already processing this CID.
+    {
+        let mut running_tasks = currently_running_tasks.lock().await;
+        if running_tasks.contains(&cid) {
+            // We're already working on that, skip it.
+            acker
+                .ack(BasicAckOptions::default())
+                .await
+                .expect("unable to ACK delivery");
+            return;
+        }
+        running_tasks.insert(cid.clone());
+    }
 
     let before = Instant::now();
     let outcome = handle_file(
@@ -166,9 +283,15 @@ async fn handle_delivery<T>(
         &mut redis_conn,
         db_conn,
         mime_cache,
-        ipfs_client,
+        ipfs_api_download_client,
+        ipfs_api_upload_client,
         failure_threshold,
+        gateway_client,
+        gateway_base_url,
         file_size_limit,
+        download_head_timeout,
+        download_get_timeout,
+        temp_file_dir,
     )
     .await;
 
@@ -179,6 +302,12 @@ async fn handle_delivery<T>(
         before.elapsed(),
         &daemon_uri,
     );
+
+    // Remove from list of running tasks
+    {
+        let mut running_tasks = currently_running_tasks.lock().await;
+        assert!(running_tasks.remove(&cid), "stolen task");
+    }
 
     // Report to RabbitMQ
     match outcome {
@@ -214,7 +343,9 @@ enum SkipReason {
 #[derive(Clone, Copy, Debug)]
 enum FailureReason {
     DownloadFailed,
+    FailedToComputeHash,
     FailedToComputeAlternativeCids,
+    FailedToDetectFreedesktopMimeType,
     FailedToDetectLibmimeMimeType,
 }
 
@@ -254,22 +385,33 @@ impl OutcomeLabel for TaskOutcome {
                 FailureReason::FailedToDetectLibmimeMimeType => {
                     "failed_to_detect_libmime_mime_type"
                 }
+                FailureReason::FailedToComputeHash => "failed_to_compute_hash",
+                FailureReason::FailedToDetectFreedesktopMimeType => {
+                    "failed_to_detect_freedesktop_mime_type"
+                }
             },
         }
     }
 }
 
-async fn handle_file<T>(
+async fn handle_file<S, T>(
     msg: FileMessage,
     redelivered: bool,
     redis_conn: &mut RedisConnection,
     db_conn: Arc<Mutex<PgConnection>>,
     mime_cache: Arc<Mutex<MimeTypeCache>>,
-    ipfs_client: Arc<T>,
+    ipfs_api_download_client: Arc<S>,
+    ipfs_api_upload_client: Arc<T>,
     failure_threshold: u64,
+    gateway_client: reqwest::Client,
+    gateway_base_url: Url,
     file_size_limit: u64,
+    download_head_timeout: Duration,
+    download_get_timeout: Duration,
+    temp_file_dir: Arc<PathBuf>,
 ) -> TaskOutcome
 where
+    S: IpfsApi + Sync,
     T: IpfsApi + Sync,
 {
     let FileMessage {
@@ -343,20 +485,36 @@ where
         alternative_cids_normalized,
         layers,
         dag_block_cids,
-    ) = match download_file(ipfs_client, cid_parts, &cid).await {
+    ) = match download_file(
+        ipfs_api_download_client,
+        ipfs_api_upload_client,
+        gateway_client,
+        gateway_base_url,
+        file_size_limit,
+        download_head_timeout,
+        download_get_timeout,
+        temp_file_dir,
+        cid_parts,
+        &cid,
+    )
+    .await
+    {
         Ok(res) => match res {
             Ok(metadata) => {
+                let FileMetadataFull {
+                    file_metadata,
+                    layers,
+                    dag_block_cids,
+                } = metadata;
                 let FileMetadata {
-                    freedesktop_mime_type: mime_type,
+                    freedesktop_mime_type,
                     libmime_mime_type,
                     file_size,
                     sha256_hash,
                     alternative_cids_normalized,
-                    layers,
-                    dag_block_cids,
-                } = metadata;
+                } = file_metadata;
                 (
-                    mime_type,
+                    freedesktop_mime_type,
                     libmime_mime_type,
                     file_size,
                     sha256_hash,
@@ -415,43 +573,160 @@ where
     Done
 }
 
+struct FileMetadataFull {
+    file_metadata: FileMetadata,
+    layers: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
+    dag_block_cids: Vec<String>,
+}
+
 struct FileMetadata {
     freedesktop_mime_type: &'static str,
     libmime_mime_type: String,
     file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids_normalized: Vec<NormalizedAlternativeCid>,
-    layers: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
-    dag_block_cids: Vec<String>,
 }
 
-async fn download_file<T>(
-    ipfs_client: Arc<T>,
+async fn download_file<S, T>(
+    ipfs_api_download_client: Arc<S>,
+    ipfs_api_upload_client: Arc<T>,
+    gateway_client: reqwest::Client,
+    gateway_base_url: Url,
+    file_size_limit: u64,
+    download_head_timeout: Duration,
+    download_get_timeout: Duration,
+    temp_file_dir: Arc<PathBuf>,
     cid_parts: CIDParts,
     cid: &String,
+) -> Result<Result<FileMetadataFull, SkipReason>, FailureReason>
+where
+    S: IpfsApi + Sync,
+    T: IpfsApi + Sync,
+{
+    let file_path = {
+        let mut temp_file_dir = temp_file_dir.to_path_buf();
+        temp_file_dir.push(cid);
+        temp_file_dir
+    };
+
+    let file_metadata_res = download_and_analyze_file(
+        ipfs_api_upload_client,
+        gateway_client,
+        &gateway_base_url,
+        file_size_limit,
+        download_head_timeout,
+        download_get_timeout,
+        &cid,
+        &file_path,
+    )
+    .await;
+    // Make sure to remove the file again
+    let _ = std::fs::remove_file(&file_path).map_err(|err| {
+        if let std::io::ErrorKind::NotFound = err.kind() {
+            // Probably deleted already, whatever.
+        } else {
+            warn!("unable to remove temporary file {:?}: {:?}", file_path, err)
+        }
+    });
+
+    let file_metadata = match file_metadata_res.map_err(|err| {
+        debug!("{}: unable to download file: {:?}", cid, err);
+        err
+    })? {
+        Ok(file_metadata) => file_metadata,
+        Err(err) => {
+            debug!("{}: skipping because of {:?}", cid, err);
+            return Ok(Err(err));
+        }
+    };
+
+    // Download block data of entire referenced DAG, in layers.
+    debug!("{}: downloading DAG metadata", cid);
+    let layers = match ipfs::download_dag_block_metadata(
+        cid,
+        cid_parts.codec,
+        None,
+        ipfs_api_download_client.clone(),
+    )
+    .await
+    .map_err(|err| {
+        debug!("{}: unable to get metadata referenced DAG: {:?}", cid, err);
+        FailureReason::DownloadFailed
+    })? {
+        Ok(layers) => layers,
+        Err(_) => {
+            debug!("{}: failed to parse referenced CID of child blocks", cid);
+            return Ok(Err(SkipReason::UnableToParseReferencedCids));
+        }
+    };
+
+    let dag_block_cids = layers
+        .iter()
+        .map(|l| l.iter())
+        .flatten()
+        .map(|(child_cidparts, _)| format!("{}", child_cidparts.cid))
+        .collect();
+
+    Ok(Ok(FileMetadataFull {
+        file_metadata,
+        layers,
+        dag_block_cids,
+    }))
+}
+
+async fn download_and_analyze_file<T>(
+    ipfs_api_upload_client: Arc<T>,
+    gateway_client: Client,
+    gateway_base_url: &Url,
+    file_size_limit: u64,
+    download_head_timeout: Duration,
+    download_get_timeout: Duration,
+    cid: &str,
+    file_path: &PathBuf,
 ) -> Result<Result<FileMetadata, SkipReason>, FailureReason>
 where
     T: IpfsApi + Sync,
 {
-    let file_data = match ipfs::query_ipfs_for_file_data(&cid, ipfs_client.clone()).await {
-        Ok(data) => data,
-        Err(err) => {
-            debug!("{}: failed to download file: {:?}", cid, err);
-            return Err(FailureReason::DownloadFailed);
+    debug!(
+        "{}: downloading via gateway to temporary file {:?}",
+        cid, file_path
+    );
+    let file_size = match ipfs::query_ipfs_for_file_data(
+        &cid,
+        gateway_client.clone(),
+        &gateway_base_url,
+        file_size_limit.clone(),
+        download_head_timeout.clone(),
+        download_get_timeout.clone(),
+        &file_path,
+    )
+    .await
+    .map_err(|e| {
+        debug!("{}: failed to download file: {:?}", cid, e);
+        FailureReason::DownloadFailed
+    })? {
+        Ok(file_size) => file_size,
+        Err(too_large_size) => {
+            debug!(
+                "{}: skipping because size advertised by gateway is {} (limit is {})",
+                cid, too_large_size, file_size_limit
+            );
+            return Ok(Err(SkipReason::FileSizeLimitExceeded));
         }
     };
-    debug!(
-        "{}: got {} bytes of file data, first bytes: {:?}",
-        cid,
-        file_data.len(),
-        file_data.iter().take(10).collect::<Vec<_>>()
-    );
-    let file_size = file_data.len();
+    debug!("{}: downloaded {} bytes via gateway", cid, file_size);
+
+    // TODO sanity-check filesize from... sum of child blocks, maybe? with some tolerance?
 
     // Compute heuristics, hash, alternative CIDs
-    let freedesktop_mime_type = get_freedesktop_mime_type(&file_data);
+    let freedesktop_mime_type = get_freedesktop_mime_type_async(&file_path)
+        .await
+        .ok_or_else(|| {
+            warn!("unable to detect freedesktop MIME type for file {}", cid);
+            FailureReason::FailedToDetectFreedesktopMimeType
+        })?;
 
-    let libmime_mime_type = get_libmime_mime_type_async(file_data.clone())
+    let libmime_mime_type = get_libmime_mime_type_async(&file_path)
         .await
         .map_err(|err| {
             warn!(
@@ -465,16 +740,21 @@ where
         "{}: detected MIME types {} (freedesktop), {} (libmime)",
         cid, freedesktop_mime_type, libmime_mime_type
     );
-    let sha256_hash = hash::compute_sha256(&file_data);
-    let alternative_cids = hash::AlternativeCids::for_bytes(ipfs_client.clone(), file_data)
-        .await
-        .map_err(|err| {
-            warn!(
-                "unable to compute alternative CIDs for file {}: {:?}",
-                cid, err
-            );
-            FailureReason::FailedToComputeAlternativeCids
-        })?;
+    let sha256_hash = hash::compute_sha256(&file_path).await.map_err(|err| {
+        warn!("unable to compute SHA256 hash for file {}: {:?}", cid, err);
+        FailureReason::FailedToComputeHash
+    })?;
+    debug!("{}: computed SHA256 hash {:?}", cid, sha256_hash);
+    let alternative_cids =
+        hash::AlternativeCids::for_bytes(ipfs_api_upload_client.clone(), &file_path)
+            .await
+            .map_err(|err| {
+                warn!(
+                    "unable to compute alternative CIDs for file {}: {:?}",
+                    cid, err
+                );
+                FailureReason::FailedToComputeAlternativeCids
+            })?;
     debug!("{}: computed alternative CIDs {:?}", cid, alternative_cids);
     let alternative_cids_normalized = alternative_cids.normalized_cids().map_err(|err| {
         warn!(
@@ -484,37 +764,12 @@ where
         FailureReason::FailedToComputeAlternativeCids
     })?;
 
-    // Download block data of entire referenced DAG, in layers.
-    debug!("{}: downloading DAG metadata", cid);
-    let layers =
-        match ipfs::download_dag_block_metadata(cid, cid_parts.codec, None, ipfs_client.clone())
-            .await
-            .map_err(|err| {
-                debug!("{}: unable to get metadata referenced DAG: {:?}", cid, err);
-                FailureReason::DownloadFailed
-            })? {
-            Ok(layers) => layers,
-            Err(_) => {
-                debug!("{}: failed to parse referenced CID of child blocks", cid);
-                return Ok(Err(SkipReason::UnableToParseReferencedCids));
-            }
-        };
-
-    let dag_block_cids = layers
-        .iter()
-        .map(|l| l.iter())
-        .flatten()
-        .map(|(child_cidparts, _)| format!("{}", child_cidparts.cid))
-        .collect();
-
     Ok(Ok(FileMetadata {
         freedesktop_mime_type,
         libmime_mime_type,
-        file_size: file_size as i64,
+        file_size,
         sha256_hash,
         alternative_cids_normalized,
-        layers,
-        dag_block_cids,
     }))
 }
 
@@ -536,23 +791,21 @@ fn set_up_libmime_detector() -> anyhow::Result<magic::Cookie> {
     Ok(cookie)
 }
 
-pub fn get_freedesktop_mime_type(bytes: &[u8]) -> &'static str {
-    tree_magic_mini::from_u8(bytes)
+pub async fn get_freedesktop_mime_type_async(file_path: &Path) -> Option<&'static str> {
+    tokio::task::block_in_place(|| tree_magic_mini::from_filepath(file_path))
 }
 
-pub async fn get_libmime_mime_type_async(bytes: Vec<u8>) -> anyhow::Result<String> {
-    tokio::task::spawn_blocking(move || get_libmime_mime_type(bytes))
-        .await
-        .unwrap()
+pub async fn get_libmime_mime_type_async(file_path: &Path) -> anyhow::Result<String> {
+    tokio::task::block_in_place(|| get_libmime_mime_type(file_path))
 }
 
-pub fn get_libmime_mime_type(bytes: Vec<u8>) -> anyhow::Result<String> {
+pub fn get_libmime_mime_type(file_path: &Path) -> anyhow::Result<String> {
     // Set up libmime detector
     let libmime_detector =
         set_up_libmime_detector().context("unable to set up libmime detector")?;
 
     let libmime_mime_type = libmime_detector
-        .buffer(&bytes)
+        .file(file_path)
         .context("failed to detect mime type")?;
 
     Ok(libmime_mime_type)

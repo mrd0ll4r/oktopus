@@ -17,15 +17,23 @@ RUN apt-get update && apt-get install -y \
   shared-mime-info \
   libmagic1
 
+# Create directory for temporary files.
+RUN mkdir -p /ipfs-indexer/tmp \
+    && chown ipfs:ipfs /ipfs-indexer/tmp
+
 # Enter our working directory.
 WORKDIR ipfs-indexer
 
 # Copy compiled binaries from builder.
 COPY --from=ipfs-indexer-builder /ipfs-indexer/target/release/file-worker .
 COPY ./docker-compose/.env .
+COPY ./docker-compose/start-file-worker.sh .
+COPY --from=ipfs-indexer-builder /sbin/su-exec /sbin/su-exec
 
 # Set ownership.
 RUN chown -R ipfs:ipfs ./file-worker
+RUN chown -R ipfs:ipfs ./start-file-worker.sh
+RUN chmod 755 ./start-file-worker.sh
 
 # Set log level.
 ENV RUST_LOG=info
@@ -33,8 +41,6 @@ ENV RUST_LOG=info
 # Expose Prometheus endpoint.
 EXPOSE 8088
 
-# Drop root.
-USER ipfs
-
-# Run the binary.
-ENTRYPOINT ["./file-worker"]
+# Run the script.
+# This will fix permissions on the temporary file storage directory, drop root, and then run the binary.
+ENTRYPOINT ["./start-file-worker.sh"]

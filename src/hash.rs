@@ -1,17 +1,29 @@
 use crate::{models, IpfsApi};
 use anyhow::{anyhow, Context};
 use cid::Cid;
+use log::debug;
 use sha2::{Digest, Sha256};
-use std::io::Cursor;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 
-pub fn compute_sha256(data: &[u8]) -> Vec<u8> {
+pub async fn compute_sha256(file_path: &Path) -> anyhow::Result<Vec<u8>> {
     let mut hasher = Sha256::new();
+    let mut file = tokio::fs::File::open(file_path)
+        .await
+        .context("unable to open file")?;
+    let mut buf = Vec::with_capacity(1024 * 1024 * 4);
 
-    hasher.update(data);
+    loop {
+        let n = file.read(&mut buf).await.context("unable to read file")?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
 
-    hasher.finalize().into_iter().collect()
+    Ok(hasher.finalize().into_iter().collect())
 }
 
 #[derive(Debug, Clone)]
@@ -93,39 +105,37 @@ impl AlternativeCids {
         .collect::<anyhow::Result<_>>()
     }
 
-    pub async fn for_bytes<T>(client: Arc<T>, bytes: Vec<u8>) -> anyhow::Result<AlternativeCids>
+    pub async fn for_bytes<T>(client: Arc<T>, file_path: &Path) -> anyhow::Result<AlternativeCids>
     where
         T: IpfsApi + Sync,
     {
-        let sha1_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha1", bytes.clone()).await?;
+        let sha1_cid = Self::for_hash_function_and_bytes(client.clone(), "sha1", file_path).await?;
         let sha2_256_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha2-256", bytes.clone()).await?;
+            Self::for_hash_function_and_bytes(client.clone(), "sha2-256", file_path).await?;
         let sha2_512_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha2-512", bytes.clone()).await?;
+            Self::for_hash_function_and_bytes(client.clone(), "sha2-512", file_path).await?;
         let sha3_224_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha3-224", bytes.clone()).await?;
+            Self::for_hash_function_and_bytes(client.clone(), "sha3-224", file_path).await?;
         let sha3_256_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha3-256", bytes.clone()).await?;
+            Self::for_hash_function_and_bytes(client.clone(), "sha3-256", file_path).await?;
         let sha3_384_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha3-384", bytes.clone()).await?;
+            Self::for_hash_function_and_bytes(client.clone(), "sha3-384", file_path).await?;
         let sha3_512_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha3-512", bytes.clone()).await?;
+            Self::for_hash_function_and_bytes(client.clone(), "sha3-512", file_path).await?;
         let dbl_sha2_256_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "dbl-sha2-256", bytes.clone())
-                .await?;
+            Self::for_hash_function_and_bytes(client.clone(), "dbl-sha2-256", file_path).await?;
         //let keccak_224_cid =
-        //    Self::for_hash_function_and_bytes(client.clone(), "keccak-224", bytes.clone()).await?;
+        //    Self::for_hash_function_and_bytes(client.clone(), "keccak-224", file_path).await?;
         let keccak_256_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "keccak-256", bytes.clone()).await?;
+            Self::for_hash_function_and_bytes(client.clone(), "keccak-256", file_path).await?;
         //let keccak_384_cid =
-        //    Self::for_hash_function_and_bytes(client.clone(), "keccak-384", bytes.clone()).await?;
+        //    Self::for_hash_function_and_bytes(client.clone(), "keccak-384", file_path).await?;
         let keccak_512_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "keccak-512", bytes.clone()).await?;
+            Self::for_hash_function_and_bytes(client.clone(), "keccak-512", file_path).await?;
         let blake3_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "blake3", bytes.clone()).await?;
+            Self::for_hash_function_and_bytes(client.clone(), "blake3", file_path).await?;
         let shake_256_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "shake-256", bytes.clone()).await?;
+            Self::for_hash_function_and_bytes(client.clone(), "shake-256", file_path).await?;
 
         Ok(AlternativeCids {
             sha1: sha1_cid,
@@ -148,12 +158,12 @@ impl AlternativeCids {
     async fn for_hash_function_and_bytes<T>(
         client: Arc<T>,
         hash: &str,
-        bytes: Vec<u8>,
+        file_path: &Path,
     ) -> anyhow::Result<String>
     where
         T: IpfsApi + Sync,
     {
-        let cursor = Cursor::new(bytes);
+        let file = std::fs::File::open(file_path).context("unable to open file")?;
 
         let opts = ipfs_api_backend_hyper::request::Add {
             only_hash: Some(true),
@@ -167,10 +177,15 @@ impl AlternativeCids {
             .unwrap()
             .start_timer();
         let resp = client
-            .add_with_options(cursor, opts)
+            .add_with_options(file, opts)
             .await
             .map_err(|err| anyhow!("{}", err))
             .context(anyhow!("unable to compute alternative {} cid", hash))?;
+        debug!(
+            "{:?}: got add response {:?} for algorithm {}",
+            file_path, resp, hash
+        );
+
         Ok(resp.hash)
     }
 }
