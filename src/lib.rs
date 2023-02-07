@@ -32,7 +32,7 @@ pub mod schema;
 
 pub type IpfsApiClient = IpfsClient<hyper::client::connect::HttpConnector>;
 
-// Include the `items` module, which is generated from items.proto.
+// Include the `unixfs` module, which is generated from unixfs.proto.
 pub mod unixfs {
     include!(concat!(env!("OUT_DIR"), "/unixfs.pb.rs"));
 }
@@ -125,6 +125,7 @@ pub enum CacheCheckResult {
     RedisMarkedDone,
     RedisFailuresAboveThreshold,
     DbFailuresAboveThreshold,
+    RedeliveredWithoutDbFailures,
     NeedsProcessing,
 }
 
@@ -144,6 +145,7 @@ pub async fn check_task_caches(
     redis_conn: &mut RedisConnection,
     db_conn: Arc<Mutex<PgConnection>>,
     failure_threshold: u64,
+    redelivered: bool,
 ) -> Result<CacheCheckResult, AsyncDBError> {
     // Check redis
     debug!("{}: checking redis", cid);
@@ -191,6 +193,15 @@ pub async fn check_task_caches(
     debug!("{}: database failures is {:?}", cid, db_res);
 
     let db_res = db_res?;
+
+    if redelivered && db_res.is_none() {
+        // This happens if a worker is stuck and killed by RabbitMQ.
+        // All unacknowledged tasks will be redelivered.
+        // Unfortunately, we don't know which task exactly caused the worker to get stuck,
+        // so we skip all tasks that are redelivered without a failure in the database.
+        return Ok(CacheCheckResult::RedeliveredWithoutDbFailures);
+    }
+
     if let Some(failures) = db_res {
         if failures.len() as u64 >= failure_threshold {
             debug!("{}: too many failures, skipping", cid);
@@ -246,6 +257,11 @@ pub async fn worker_setup() -> anyhow::Result<WorkerConnections> {
     }
     info!("set up RabbitMQ queues");
 
+    // Update the panic handler to always exit the process.
+    // This is necessary, because tokio modifies it in a way that catches async tasks panicking.
+    // We could retrieve those by joining the task, which is annoying, since we'd exit as a
+    // reaction anyway.
+    // So instead, we just patch the panic handler to exit, as usual.
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default_panic(info);

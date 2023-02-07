@@ -163,7 +163,12 @@ async fn handle_delivery<T>(
 ) where
     T: IpfsApi + Sync,
 {
-    let Delivery { data, acker, .. } = delivery;
+    let Delivery {
+        data,
+        acker,
+        redelivered,
+        ..
+    } = delivery;
     let msg = match queue::decode_directory(&data) {
         Ok(cid) => cid,
         Err(err) => {
@@ -175,6 +180,7 @@ async fn handle_delivery<T>(
     let before = Instant::now();
     let outcome = handle_directory(
         msg,
+        redelivered,
         &mut redis_conn,
         blocks_chan,
         files_chan,
@@ -221,6 +227,7 @@ enum SkipReason {
     NoLinks,
     DbFailureThreshold,
     UnableToParseReferencedCids,
+    RedeliveredWithoutDbFailure,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -262,6 +269,7 @@ impl OutcomeLabel for TaskOutcome {
                 SkipReason::NoLinks => "no_links",
                 SkipReason::DbFailureThreshold => "db_failure_threshold",
                 SkipReason::UnableToParseReferencedCids => "unable_to_parse_referenced_cids",
+                SkipReason::RedeliveredWithoutDbFailure => "redelivered_without_db_failure",
             },
             Failed(reason) => match reason {
                 FailureReason::DownloadFailed => "download_failed",
@@ -272,6 +280,7 @@ impl OutcomeLabel for TaskOutcome {
 
 async fn handle_directory<T>(
     msg: DirectoryMessage,
+    redelivered: bool,
     redis_conn: &mut RedisConnection,
     blocks_chan: Arc<lapin::Channel>,
     files_chan: Arc<lapin::Channel>,
@@ -302,6 +311,7 @@ where
         redis_conn,
         db_conn.clone(),
         failure_threshold,
+        redelivered,
     )
     .await
     .expect("unable to check block failures in database")
@@ -312,6 +322,10 @@ where
         }
         CacheCheckResult::DbFailuresAboveThreshold => {
             return Skipped(SkipReason::DbFailureThreshold)
+        }
+        CacheCheckResult::RedeliveredWithoutDbFailures => {
+            // TODO record failure in DB
+            return Skipped(SkipReason::RedeliveredWithoutDbFailure);
         }
         CacheCheckResult::NeedsProcessing => {
             // We have to process it (again)
