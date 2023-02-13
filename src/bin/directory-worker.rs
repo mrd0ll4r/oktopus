@@ -535,6 +535,7 @@ async fn index_and_insert<T>(
 where
     T: IpfsApi + Sync,
 {
+    let start_ts = chrono::Utc::now();
     let listing = match ipfs::query_ipfs_for_directory_listing(&cid, ipfs_client.clone(), true)
         .await
     {
@@ -552,6 +553,7 @@ where
             return Err(FailureReason::DownloadFailed);
         }
     };
+    let end_ts = chrono::Utc::now();
     debug!("{}: got directory listing {:?}", cid, listing);
 
     // Download block data
@@ -559,6 +561,7 @@ where
     for (_, _, cidparts) in listing.iter() {
         let child_cid = format!("{}", cidparts.cid);
         debug!("{}: getting block stats for child {}", cid, child_cid);
+        let start_ts = chrono::Utc::now();
         let metadata = match ipfs::query_ipfs_for_block_level_data(
             &child_cid,
             cidparts.codec,
@@ -590,8 +593,9 @@ where
                 return Err(FailureReason::DownloadFailed);
             }
         };
+        let end_ts = chrono::Utc::now();
 
-        block_metadata.push(metadata);
+        block_metadata.push((metadata, start_ts, end_ts));
     }
     let entries = listing
         .into_iter()
@@ -606,7 +610,8 @@ where
         db_block.id,
         entries,
         None,
-        chrono::Utc::now(),
+        end_ts,
+        start_ts,
     )
     .await
     .expect("unable to upsert block metadata into database");
@@ -634,6 +639,7 @@ async fn fast_index_and_insert<T>(
 where
     T: IpfsApi + Sync,
 {
+    let start_ts = chrono::Utc::now();
     let listing = match ipfs::query_ipfs_for_directory_listing(&cid, ipfs_client.clone(), false)
         .await
     {
@@ -651,6 +657,7 @@ where
             return Err(FailureReason::DownloadFailed);
         }
     };
+    let end_ts = chrono::Utc::now();
     debug!("{}: got directory listing {:?}", cid, listing);
 
     // We don't have block-level metadata, so we augment this with None
@@ -666,7 +673,8 @@ where
         db_block.id,
         entries,
         None,
-        chrono::Utc::now(),
+        end_ts,
+        start_ts,
     )
     .await
     .expect("unable to upsert block metadata into database");

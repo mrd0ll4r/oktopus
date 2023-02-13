@@ -328,6 +328,7 @@ where
                 cid
             );
 
+            let start_ts = chrono::Utc::now();
             let block_level_metadata =
                 match ipfs::query_ipfs_for_block_level_data(&cid, cid_parts.codec, ipfs_client)
                     .await
@@ -368,6 +369,7 @@ where
                 block_level_metadata.unixfs_type_id,
                 block_level_metadata.links,
                 chrono::Utc::now(),
+                start_ts,
             )
             .await
             .expect("unable to upsert block metadata into database");

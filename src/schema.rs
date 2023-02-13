@@ -99,10 +99,13 @@ diesel::table! {
 }
 
 diesel::table! {
-    successful_downloads (block_id, download_type_id, ts) {
+    successful_downloads (block_id, download_type_id, end_ts) {
         block_id -> Int8,
         download_type_id -> Int4,
-        ts -> Timestamptz,
+        end_ts -> Timestamptz,
+        start_ts -> Nullable<Timestamptz>,
+        head_finished_ts -> Nullable<Timestamptz>,
+        download_finished_ts -> Nullable<Timestamptz>,
     }
 }
 

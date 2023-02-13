@@ -18,7 +18,19 @@ pub async fn download_dag_block_metadata<T>(
     codec: u64,
     cids_to_skip: Option<Vec<CIDParts>>,
     ipfs_client: Arc<T>,
-) -> anyhow::Result<Result<Vec<Vec<(CIDParts, BlockLevelMetadata)>>, ParseReferencedCidFailed>>
+) -> anyhow::Result<
+    Result<
+        Vec<
+            Vec<(
+                CIDParts,
+                BlockLevelMetadata,
+                chrono::DateTime<chrono::Utc>,
+                chrono::DateTime<chrono::Utc>,
+            )>,
+        >,
+        ParseReferencedCidFailed,
+    >,
+>
 where
     T: IpfsApi + Sync,
 {
@@ -50,6 +62,7 @@ where
             }
 
             let child_cid = format!("{}", child_cidparts.cid);
+            let start_ts = chrono::Utc::now();
             let child_metadata = match ipfs::query_ipfs_for_block_level_data(
                 &child_cid,
                 child_cidparts.codec,
@@ -63,13 +76,13 @@ where
                     return Ok(Err(()));
                 }
             };
-            wip_layer.push((child_cidparts, child_metadata));
+            wip_layer.push((child_cidparts, child_metadata, start_ts, chrono::Utc::now()));
         }
 
         current_layer = Some(
             wip_layer
                 .iter()
-                .map(|(_, metadata)| metadata.links.clone())
+                .map(|(_, metadata, _, _)| metadata.links.clone())
                 .collect(),
         );
         layers.push(wip_layer);
@@ -94,7 +107,7 @@ pub async fn query_ipfs_for_file_data(
     head_timeout: Duration,
     download_timeout: Duration,
     file_path: &Path,
-) -> anyhow::Result<std::result::Result<i64, i64>> {
+) -> anyhow::Result<std::result::Result<(i64, chrono::DateTime<chrono::Utc>), i64>> {
     let url = build_gateway_url(gateway_base_url, c);
     debug!("{}: requesting via IPFS gateway at {}...", c, url);
 
@@ -120,6 +133,7 @@ pub async fn query_ipfs_for_file_data(
             Err(_) => return Err(anyhow!("resolve/HEAD timeout")),
         }
     };
+    let head_finished_ts = chrono::Utc::now();
     debug!("{}: got initial response from gateway: {:?}", c, response);
     let advertised_file_size = response.content_length();
     if let Some(size) = advertised_file_size {
@@ -143,7 +157,7 @@ pub async fn query_ipfs_for_file_data(
             e
         })?;
 
-    Ok(Ok(file_size))
+    Ok(Ok((file_size, head_finished_ts)))
 }
 
 async fn perform_gateway_download(

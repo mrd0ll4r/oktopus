@@ -478,6 +478,10 @@ where
     );
 
     let (
+        start_ts,
+        head_finished_ts,
+        download_finished_ts,
+        end_ts,
         freedesktop_mime_type,
         libmime_mime_type,
         file_size,
@@ -507,6 +511,10 @@ where
                     dag_block_cids,
                 } = metadata;
                 let FileMetadata {
+                    start_ts,
+                    head_finished_ts,
+                    download_finished_ts,
+                    end_ts,
                     freedesktop_mime_type,
                     libmime_mime_type,
                     file_size,
@@ -514,6 +522,10 @@ where
                     alternative_cids_normalized,
                 } = file_metadata;
                 (
+                    start_ts,
+                    head_finished_ts,
+                    download_finished_ts,
+                    end_ts,
                     freedesktop_mime_type,
                     libmime_mime_type,
                     file_size,
@@ -549,7 +561,10 @@ where
         sha256_hash,
         alternative_cids_normalized,
         layers,
-        chrono::Utc::now(),
+        end_ts,
+        start_ts,
+        head_finished_ts,
+        download_finished_ts,
     )
     .await
     .expect("unable to upsert file metadata into database");
@@ -575,11 +590,22 @@ where
 
 struct FileMetadataFull {
     file_metadata: FileMetadata,
-    layers: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
+    layers: Vec<
+        Vec<(
+            CIDParts,
+            BlockLevelMetadata,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+    >,
     dag_block_cids: Vec<String>,
 }
 
 struct FileMetadata {
+    start_ts: chrono::DateTime<chrono::Utc>,
+    head_finished_ts: chrono::DateTime<chrono::Utc>,
+    download_finished_ts: chrono::DateTime<chrono::Utc>,
+    end_ts: chrono::DateTime<chrono::Utc>,
     freedesktop_mime_type: &'static str,
     libmime_mime_type: String,
     file_size: i64,
@@ -664,7 +690,7 @@ where
         .iter()
         .map(|l| l.iter())
         .flatten()
-        .map(|(child_cidparts, _)| format!("{}", child_cidparts.cid))
+        .map(|(child_cidparts, _, _, _)| format!("{}", child_cidparts.cid))
         .collect();
 
     Ok(Ok(FileMetadataFull {
@@ -691,7 +717,8 @@ where
         "{}: downloading via gateway to temporary file {:?}",
         cid, file_path
     );
-    let file_size = match ipfs::query_ipfs_for_file_data(
+    let start_ts = chrono::Utc::now();
+    let (file_size, head_finished_ts) = match ipfs::query_ipfs_for_file_data(
         &cid,
         gateway_client.clone(),
         &gateway_base_url,
@@ -705,7 +732,7 @@ where
         debug!("{}: failed to download file: {:?}", cid, e);
         FailureReason::DownloadFailed
     })? {
-        Ok(file_size) => file_size,
+        Ok((file_size, head_finished_ts)) => (file_size, head_finished_ts),
         Err(too_large_size) => {
             debug!(
                 "{}: skipping because size advertised by gateway is {} (limit is {})",
@@ -714,6 +741,7 @@ where
             return Ok(Err(SkipReason::FileSizeLimitExceeded));
         }
     };
+    let download_finished_ts = chrono::Utc::now();
     debug!("{}: downloaded {} bytes via gateway", cid, file_size);
 
     // TODO sanity-check filesize from... sum of child blocks, maybe? with some tolerance?
@@ -765,6 +793,10 @@ where
     })?;
 
     Ok(Ok(FileMetadata {
+        start_ts,
+        head_finished_ts,
+        download_finished_ts,
+        end_ts: chrono::Utc::now(),
         freedesktop_mime_type,
         libmime_mime_type,
         file_size,

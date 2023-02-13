@@ -393,6 +393,7 @@ async fn fast_index_and_insert<T>(
 where
     T: IpfsApi + Sync,
 {
+    let start_ts = chrono::Utc::now();
     let listing = match ipfs::query_ipfs_for_directory_listing(&cid, ipfs_client.clone(), false)
         .await
     {
@@ -410,6 +411,7 @@ where
             return Err(FailureReason::DownloadFailed);
         }
     };
+    let end_ts = chrono::Utc::now();
     debug!("{}: got directory listing {:?}", cid, listing);
 
     let listing_cids = listing
@@ -455,7 +457,8 @@ where
         db_block.id,
         entries,
         Some(layers),
-        chrono::Utc::now(),
+        end_ts,
+        start_ts,
     )
     .await
     .expect("unable to upsert block metadata into database");

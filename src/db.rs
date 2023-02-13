@@ -28,7 +28,8 @@ pub async fn async_upsert_successful_block(
     block_size: i32,
     unixfs_type_id: i32,
     links: Vec<(String, i64, CIDParts)>,
-    ts: chrono::DateTime<chrono::Utc>,
+    end_ts: chrono::DateTime<chrono::Utc>,
+    start_ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(BlockStat, Vec<BlockLink>), AsyncDBError> {
     let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
         .get_metric_with_label_values(&["upsert_successful_block"])
@@ -38,7 +39,15 @@ pub async fn async_upsert_successful_block(
     tokio::task::spawn_blocking(move || {
         let mut conn = conn.lock().unwrap();
 
-        upsert_successful_block(&mut conn, p_block_id, block_size, unixfs_type_id, links, ts)
+        upsert_successful_block(
+            &mut conn,
+            p_block_id,
+            block_size,
+            unixfs_type_id,
+            links,
+            end_ts,
+            start_ts,
+        )
     })
     .await
     .map_err(AsyncDBError::Runtime)?
@@ -48,9 +57,28 @@ pub async fn async_upsert_successful_block(
 pub async fn async_upsert_successful_directory(
     conn: Arc<Mutex<PgConnection>>,
     p_block_id: i64,
-    entries: Vec<(String, i64, CIDParts, Option<BlockLevelMetadata>)>,
-    additional_dag_nodes: Option<Vec<Vec<(CIDParts, BlockLevelMetadata)>>>,
-    ts: chrono::DateTime<chrono::Utc>,
+    entries: Vec<(
+        String,
+        i64,
+        CIDParts,
+        Option<(
+            BlockLevelMetadata,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+    )>,
+    additional_dag_nodes: Option<
+        Vec<
+            Vec<(
+                CIDParts,
+                BlockLevelMetadata,
+                chrono::DateTime<chrono::Utc>,
+                chrono::DateTime<chrono::Utc>,
+            )>,
+        >,
+    >,
+    end_ts: chrono::DateTime<chrono::Utc>,
+    start_ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<
     Vec<(
         DirectoryEntry,
@@ -68,7 +96,14 @@ pub async fn async_upsert_successful_directory(
     tokio::task::spawn_blocking(move || {
         let mut conn = conn.lock().unwrap();
 
-        upsert_successful_directory(&mut conn, p_block_id, entries, additional_dag_nodes, ts)
+        upsert_successful_directory(
+            &mut conn,
+            p_block_id,
+            entries,
+            additional_dag_nodes,
+            end_ts,
+            start_ts,
+        )
     })
     .await
     .map_err(AsyncDBError::Runtime)?
@@ -84,8 +119,18 @@ pub async fn async_upsert_successful_file(
     file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids: Vec<NormalizedAlternativeCid>,
-    dag: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
-    ts: chrono::DateTime<chrono::Utc>,
+    dag: Vec<
+        Vec<(
+            CIDParts,
+            BlockLevelMetadata,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+    >,
+    end_ts: chrono::DateTime<chrono::Utc>,
+    start_ts: chrono::DateTime<chrono::Utc>,
+    head_finished_ts: chrono::DateTime<chrono::Utc>,
+    download_finished_ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), AsyncDBError> {
     let _timer = crate::prom::DB_METHOD_CALL_DURATIONS
         .get_metric_with_label_values(&["upsert_successful_file"])
@@ -106,7 +151,10 @@ pub async fn async_upsert_successful_file(
             sha256_hash,
             alternative_cids,
             dag,
-            ts,
+            end_ts,
+            start_ts,
+            head_finished_ts,
+            download_finished_ts,
         )
     })
     .await
@@ -255,8 +303,18 @@ pub fn upsert_successful_file(
     file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids: Vec<NormalizedAlternativeCid>,
-    dag: Vec<Vec<(CIDParts, BlockLevelMetadata)>>,
-    ts: chrono::DateTime<chrono::Utc>,
+    dag: Vec<
+        Vec<(
+            CIDParts,
+            BlockLevelMetadata,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+    >,
+    end_ts: chrono::DateTime<chrono::Utc>,
+    start_ts: chrono::DateTime<chrono::Utc>,
+    head_finished_ts: chrono::DateTime<chrono::Utc>,
+    download_finished_ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), diesel::result::Error> {
     debug!("upserting successful file for block {}", p_block_id);
 
@@ -285,7 +343,7 @@ pub fn upsert_successful_file(
             // Insert successful blocks
             // TODO there is an optimization to be made here if we iterate in reverse and remember
             // the database block IDs of the previous layer.
-            for (cidparts, metadata) in layer {
+            for (cidparts, metadata, start_ts, end_ts) in layer {
                 let (db_block, _) = upsert_block_and_cid(conn, cidparts)?;
 
                 upsert_successful_block(
@@ -294,13 +352,22 @@ pub fn upsert_successful_file(
                     metadata.block_size,
                     metadata.unixfs_type_id,
                     metadata.links,
-                    ts,
+                    end_ts,
+                    start_ts,
                 )?;
             }
         }
 
         // Insert download success timestamp
-        insert_download_success_idempotent(conn, p_block_id, DOWNLOAD_TYPE_DAG_ID, ts)?;
+        insert_download_success_idempotent(
+            conn,
+            p_block_id,
+            DOWNLOAD_TYPE_DAG_ID,
+            end_ts,
+            start_ts,
+            Some(head_finished_ts),
+            Some(download_finished_ts),
+        )?;
         debug!("inserted download success");
 
         Ok(())
@@ -387,9 +454,28 @@ fn insert_block_file_alternative_cids_idempotent(
 pub fn upsert_successful_directory(
     conn: &mut PgConnection,
     p_block_id: i64,
-    entries: Vec<(String, i64, CIDParts, Option<BlockLevelMetadata>)>,
-    additional_dag_nodes: Option<Vec<Vec<(CIDParts, BlockLevelMetadata)>>>,
-    ts: chrono::DateTime<chrono::Utc>,
+    entries: Vec<(
+        String,
+        i64,
+        CIDParts,
+        Option<(
+            BlockLevelMetadata,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+    )>,
+    additional_dag_nodes: Option<
+        Vec<
+            Vec<(
+                CIDParts,
+                BlockLevelMetadata,
+                chrono::DateTime<chrono::Utc>,
+                chrono::DateTime<chrono::Utc>,
+            )>,
+        >,
+    >,
+    end_ts: chrono::DateTime<chrono::Utc>,
+    start_ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<
     Vec<(
         DirectoryEntry,
@@ -419,14 +505,15 @@ pub fn upsert_successful_directory(
 
                 match stats {
                     None => Ok((cid, db_cid, db_block, None)),
-                    Some(stats) => {
+                    Some((stats, end_start_ts, block_end_ts)) => {
                         let (stat, links) = upsert_successful_block(
                             conn,
                             db_block.id,
                             stats.block_size,
                             stats.unixfs_type_id,
                             stats.links,
-                            ts,
+                            block_end_ts,
+                            end_start_ts,
                         )?;
 
                         Ok((cid, db_cid, db_block, Some((stat, links))))
@@ -454,7 +541,7 @@ pub fn upsert_successful_directory(
             // Insert successful blocks
             // TODO there is an optimization to be made here if we iterate in reverse and remember
             // the database block IDs of the previous layer.
-            for (cidparts, metadata) in layer {
+            for (cidparts, metadata, block_start_ts, block_end_ts) in layer {
                 let (db_block, _) = upsert_block_and_cid(conn, cidparts)?;
 
                 upsert_successful_block(
@@ -463,13 +550,22 @@ pub fn upsert_successful_directory(
                     metadata.block_size,
                     metadata.unixfs_type_id,
                     metadata.links,
-                    ts,
+                    block_end_ts,
+                    block_start_ts,
                 )?;
             }
         }
 
         // Insert successful download
-        insert_download_success_idempotent(conn, p_block_id, DOWNLOAD_TYPE_DAG_ID, ts)?;
+        insert_download_success_idempotent(
+            conn,
+            p_block_id,
+            DOWNLOAD_TYPE_DAG_ID,
+            end_ts,
+            start_ts,
+            None,
+            None,
+        )?;
         debug!("inserted download success");
 
         Ok(directory_entries
@@ -486,9 +582,10 @@ pub fn upsert_successful_block(
     block_size: i32,
     unixfs_type_id: i32,
     links: Vec<(String, i64, CIDParts)>,
-    ts: chrono::DateTime<chrono::Utc>,
+    end_ts: chrono::DateTime<chrono::Utc>,
+    start_ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(BlockStat, Vec<BlockLink>), diesel::result::Error> {
-    debug!("upserting successful block stat for block {}, size {}, unixfs type ID {}, links {:?}, ts {:?}",p_block_id,block_size,unixfs_type_id,links,ts);
+    debug!("upserting successful block stat for block {}, size {}, unixfs type ID {}, links {:?}, start_ts {:?}, end_ts {:?}",p_block_id,block_size,unixfs_type_id,links,start_ts,end_ts);
 
     conn.transaction::<(BlockStat, Vec<BlockLink>), diesel::result::Error, _>(|conn| {
         // Upsert referenced CIDs
@@ -520,7 +617,15 @@ pub fn upsert_successful_block(
         debug!("upserted block stat {:?}", stat);
 
         // Insert successful download
-        insert_download_success_idempotent(conn, p_block_id, DOWNLOAD_TYPE_BLOCK_ID, ts)?;
+        insert_download_success_idempotent(
+            conn,
+            p_block_id,
+            DOWNLOAD_TYPE_BLOCK_ID,
+            end_ts,
+            start_ts,
+            None,
+            None,
+        )?;
         debug!("inserted download success");
 
         Ok((stat, links))
@@ -671,14 +776,20 @@ pub fn insert_download_success_idempotent(
     conn: &mut PgConnection,
     p_block_id: i64,
     download_type_id: i32,
-    ts: chrono::DateTime<chrono::Utc>,
+    end_ts: chrono::DateTime<chrono::Utc>,
+    start_ts: chrono::DateTime<chrono::Utc>,
+    head_finished_ts: Option<chrono::DateTime<chrono::Utc>>,
+    download_finished_ts: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), diesel::result::Error> {
     use crate::schema::successful_downloads;
 
     let new_success = NewSuccessfulDownload {
         block_id: &p_block_id,
         download_type_id: &download_type_id,
-        ts: &ts,
+        start_ts: &start_ts,
+        end_ts: &end_ts,
+        head_finished_ts: head_finished_ts.as_ref(),
+        download_finished_ts: download_finished_ts.as_ref(),
     };
 
     // The ON CONFLICT DO NOTHING is important, see the comment on the failure insertion case.

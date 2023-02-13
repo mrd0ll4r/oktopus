@@ -54,11 +54,14 @@ lazy_static! {
 }
 
 #[derive(Identifiable, Associations, Queryable, Debug, Clone, PartialEq, Eq)]
-#[diesel(table_name=successful_downloads,primary_key(block_id, ts),belongs_to(Block, foreign_key=block_id),belongs_to(DownloadType, foreign_key=download_type_id))]
+#[diesel(table_name=successful_downloads,primary_key(block_id, download_finished_ts),belongs_to(Block, foreign_key=block_id),belongs_to(DownloadType, foreign_key=download_type_id))]
 pub struct SuccessfulDownload {
     pub block_id: i64,
     pub download_type_id: i32,
-    pub ts: chrono::DateTime<chrono::Utc>,
+    pub end_ts: chrono::DateTime<chrono::Utc>,
+    pub start_ts: Option<chrono::DateTime<chrono::Utc>>,
+    pub head_finished_ts: Option<chrono::DateTime<chrono::Utc>>,
+    pub download_finished_ts: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Insertable, Debug)]
@@ -66,7 +69,10 @@ pub struct SuccessfulDownload {
 pub struct NewSuccessfulDownload<'a> {
     pub block_id: &'a i64,
     pub download_type_id: &'a i32,
-    pub ts: &'a chrono::DateTime<chrono::Utc>,
+    pub end_ts: &'a chrono::DateTime<chrono::Utc>,
+    pub start_ts: &'a chrono::DateTime<chrono::Utc>,
+    pub head_finished_ts: Option<&'a chrono::DateTime<chrono::Utc>>,
+    pub download_finished_ts: Option<&'a chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Identifiable, Associations, Queryable, Debug, Clone, PartialEq, Eq)]
