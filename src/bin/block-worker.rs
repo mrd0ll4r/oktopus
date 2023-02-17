@@ -8,14 +8,14 @@ use ipfs_indexer::prom::OutcomeLabel;
 use ipfs_indexer::queue::{BlockMessage, DirectoryMessage, FileMessage, HamtShardMessage};
 use ipfs_indexer::redis::RedisConnection;
 use ipfs_indexer::{
-    db, ipfs, logging, models, prom, queue, redis, CacheCheckResult, IpfsApiClient,
+    db, ipfs, logging, models, prom, queue, redis, CacheCheckResult, IpfsApiClient, Timeouts,
     WorkerConnections,
 };
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
 use log::{debug, info, warn};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -33,8 +33,8 @@ Static configuration is taken from a .env file, see the README for more informat
 
     let failure_threshold = ipfs_indexer::failed_block_downloads_threshold_from_env()
         .context("unable to determine failed block downloads threshold")?;
-    let download_timeout = ipfs_indexer::block_worker_ipfs_timeout_secs_from_env()
-        .context("unable to determine download timeout")?;
+    let timeouts =
+        Arc::new(Timeouts::from_env().context("unable to load timeouts from environment")?);
 
     let daemon_uri = matches
         .get_one::<String>("daemon")
@@ -47,7 +47,7 @@ Static configuration is taken from a .env file, see the README for more informat
         client,
         ipfs_api_backend_hyper::GlobalOptions {
             offline: None,
-            timeout: Some(Duration::from_secs(download_timeout)),
+            timeout: Some(timeouts.block_download),
         },
     );
     let client = Arc::new(client_with_timeout);
@@ -117,6 +117,7 @@ Static configuration is taken from a .env file, see the README for more informat
         let hamtshards_chan = hamtshards_chan.clone();
         let db_conn = db_conn.clone();
         let ipfs_client = client.clone();
+        let timeouts = timeouts.clone();
 
         tokio::spawn(async move {
             handle_delivery(
@@ -129,6 +130,7 @@ Static configuration is taken from a .env file, see the README for more informat
                 db_conn,
                 ipfs_client,
                 failure_threshold,
+                timeouts,
             )
             .await
         });
@@ -147,6 +149,7 @@ async fn handle_delivery<T>(
     db_conn: Arc<Mutex<PgConnection>>,
     ipfs_client: Arc<T>,
     failure_threshold: u64,
+    timeouts: Arc<Timeouts>,
 ) where
     T: IpfsApi + Sync,
 {
@@ -175,6 +178,7 @@ async fn handle_delivery<T>(
         db_conn,
         ipfs_client,
         failure_threshold,
+        timeouts,
     )
     .await;
 
@@ -272,6 +276,7 @@ async fn handle_block<T>(
     db_conn: Arc<Mutex<PgConnection>>,
     ipfs_client: Arc<T>,
     failure_threshold: u64,
+    timeouts: Arc<Timeouts>,
 ) -> TaskOutcome
 where
     T: IpfsApi + Sync,
@@ -329,36 +334,40 @@ where
             );
 
             let start_ts = chrono::Utc::now();
-            let block_level_metadata =
-                match ipfs::query_ipfs_for_block_level_data(&cid, cid_parts.codec, ipfs_client)
-                    .await
-                {
-                    Ok(metadata) => {
-                        match metadata {
-                            Ok(metadata) => metadata,
-                            Err(_) => {
-                                // Parsing the referenced CID failed.
-                                return Skipped(SkipReason::UnableToParseReferencedCids);
-                            }
+            let block_level_metadata = match ipfs::query_ipfs_for_block_level_data(
+                &cid,
+                cid_parts.codec,
+                ipfs_client,
+                timeouts,
+            )
+            .await
+            {
+                Ok(metadata) => {
+                    match metadata {
+                        Ok(metadata) => metadata,
+                        Err(_) => {
+                            // Parsing the referenced CID failed.
+                            return Skipped(SkipReason::UnableToParseReferencedCids);
                         }
                     }
-                    Err(err) => {
-                        debug!("{}: unable to get block-level metadata: {:?}", cid, err);
+                }
+                Err(err) => {
+                    debug!("{}: unable to get block-level metadata: {:?}", cid, err);
 
-                        db::async_insert_block_download_failure(
-                            db_conn.clone(),
-                            db_block.id,
-                            chrono::Utc::now(),
-                        )
-                        .await
-                        .expect("unable to insert download failure into database");
-                        debug!("{}: marked failed in database", cid);
+                    db::async_insert_block_download_failure(
+                        db_conn.clone(),
+                        db_block.id,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                    .expect("unable to insert download failure into database");
+                    debug!("{}: marked failed in database", cid);
 
-                        redis_mark_failed(&cid, redis_conn).await;
+                    redis_mark_failed(&cid, redis_conn).await;
 
-                        return Failed(FailureReason::DownloadFailed);
-                    }
-                };
+                    return Failed(FailureReason::DownloadFailed);
+                }
+            };
             debug!("{}: got metadata {:?}", cid, block_level_metadata);
 
             debug!("{}: inserting metadata to database", cid);

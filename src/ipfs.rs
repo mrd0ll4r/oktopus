@@ -1,4 +1,4 @@
-use crate::{ipfs, models, parse_cid_to_parts, CIDParts};
+use crate::{models, parse_cid_to_parts, CIDParts, Timeouts};
 use anyhow::{anyhow, Context};
 use futures_util::TryStreamExt;
 use ipfs_api_backend_hyper::response::IpfsHeader;
@@ -18,6 +18,7 @@ pub async fn download_dag_block_metadata<T>(
     codec: u64,
     cids_to_skip: Option<Vec<CIDParts>>,
     ipfs_client: Arc<T>,
+    timeouts: Arc<Timeouts>,
 ) -> anyhow::Result<
     Result<
         Vec<
@@ -45,9 +46,10 @@ where
         .map(|c| c.cid)
         .collect::<HashSet<_>>();
     let mut layers = Vec::new();
-    let root_metadata = query_ipfs_for_block_level_data(&cid, codec, ipfs_client.clone())
-        .await?
-        .expect("unable to parse children CIDs of block already present in database");
+    let root_metadata =
+        query_ipfs_for_block_level_data(&cid, codec, ipfs_client.clone(), timeouts.clone())
+            .await?
+            .expect("unable to parse children CIDs of block already present in database");
     debug!("{}: got root metadata {:?}", cid, root_metadata);
 
     let mut current_layer = Some(vec![root_metadata.links]);
@@ -63,10 +65,11 @@ where
 
             let child_cid = format!("{}", child_cidparts.cid);
             let start_ts = chrono::Utc::now();
-            let child_metadata = match ipfs::query_ipfs_for_block_level_data(
+            let child_metadata = match query_ipfs_for_block_level_data(
                 &child_cid,
                 child_cidparts.codec,
                 ipfs_client.clone(),
+                timeouts.clone(),
             )
             .await?
             {
@@ -104,9 +107,8 @@ pub async fn query_ipfs_for_file_data(
     client: reqwest::Client,
     gateway_base_url: &Url,
     file_size_limit: u64,
-    head_timeout: Duration,
-    download_timeout: Duration,
     file_path: &Path,
+    timeouts: Arc<Timeouts>,
 ) -> anyhow::Result<std::result::Result<(i64, chrono::DateTime<chrono::Utc>), i64>> {
     let url = build_gateway_url(gateway_base_url, c);
     debug!("{}: requesting via IPFS gateway at {}...", c, url);
@@ -125,7 +127,7 @@ pub async fn query_ipfs_for_file_data(
             .start_timer();
 
         let request = client.get(url).send();
-        match tokio::time::timeout(head_timeout, request).await {
+        match tokio::time::timeout(timeouts.file_head, request).await {
             Ok(result) => result
                 .context("unable to perform request")?
                 .error_for_status()
@@ -143,7 +145,7 @@ pub async fn query_ipfs_for_file_data(
     }
 
     debug!("{}: starting download via gateway", c);
-    let file_size = perform_gateway_download(c, response, download_timeout, file_path)
+    let file_size = perform_gateway_download(c, response, timeouts.file_download, file_path)
         .await
         .map_err(|e| {
             // Try to remove the file if it exists already, on a best-effort basis.
@@ -201,6 +203,7 @@ pub async fn query_ipfs_for_directory_listing<T>(
     cid: &str,
     ipfs_client: Arc<T>,
     full: bool,
+    timeouts: Arc<Timeouts>,
 ) -> anyhow::Result<Vec<(String, i64, CIDParts)>>
 where
     T: IpfsApi + Sync,
@@ -208,26 +211,31 @@ where
     let ts_before = Instant::now();
     let res = if full {
         debug!("querying IPFS for full ls");
-        ipfs_client
-            .ls(cid)
+        tokio::time::timeout(timeouts.directory_download, ipfs_client.ls(cid))
             .await
+            .context("timeout")?
             .map(|v| v.objects)
             .map_err(|err| anyhow!("{}", err))
             .context("unable to get directory listing")?
     } else {
         debug!("querying IPFS for fast ls");
-        ipfs_client
-            .ls_with_options(ipfs_api_backend_hyper::request::Ls {
-                path: cid,
-                stream: Some(true),
-                resolve_type: Some(false),
-                size: Some(false),
-            })
-            .map_err(|err| anyhow!("{}", err))
-            .map_ok(|v| v.objects)
-            .try_concat()
-            .await
-            .context("unable to get directory listing")?
+
+        tokio::time::timeout(
+            timeouts.directory_download,
+            ipfs_client
+                .ls_with_options(ipfs_api_backend_hyper::request::Ls {
+                    path: cid,
+                    stream: Some(true),
+                    resolve_type: Some(false),
+                    size: Some(false),
+                })
+                .map_err(|err| anyhow!("{}", err))
+                .map_ok(|v| v.objects)
+                .try_concat(),
+        )
+        .await
+        .context("timeout")?
+        .context("unable to get directory listing")?
     };
     let elapsed = ts_before.elapsed();
     crate::prom::IPFS_METHOD_CALL_DURATIONS
@@ -258,11 +266,12 @@ pub async fn query_ipfs_for_block_level_data<T>(
     cid: &str,
     codec: u64,
     ipfs_client: Arc<T>,
+    timeouts: Arc<Timeouts>,
 ) -> anyhow::Result<Result<BlockLevelMetadata, ParseReferencedCidFailed>>
 where
     T: IpfsApi + Sync,
 {
-    let metadata = query_ipfs_for_block(cid, codec, ipfs_client).await?;
+    let metadata = query_ipfs_for_block(cid, codec, ipfs_client, timeouts).await?;
 
     // Translate UnixFS type
     let unixfs_type_id = if let Some(unixfs_metadata) = &metadata.dag_data {
@@ -319,17 +328,19 @@ async fn query_ipfs_for_block<T>(
     cid: &str,
     codec: u64,
     ipfs_client: Arc<T>,
+    timeouts: Arc<Timeouts>,
 ) -> anyhow::Result<InternalBlockLevelMetadata>
 where
     T: IpfsApi + Sync,
 {
     debug!("{}: block stat", cid);
     let ts_before = Instant::now();
-    let block_stat_resp = ipfs_client
-        .block_stat(cid)
-        .await
-        .map_err(|err| anyhow!("{}", err))
-        .context("unable to block stat")?;
+    let block_stat_resp =
+        tokio::time::timeout(timeouts.block_download, ipfs_client.block_stat(cid))
+            .await
+            .context("timeout")?
+            .map_err(|err| anyhow!("{}", err))
+            .context("unable to block stat")?;
     let dur_block_stat = ts_before.elapsed();
     debug!(
         "{}: block stat took {:?}, block size: {}",
@@ -350,11 +361,12 @@ where
 
     debug!("{}: object get", cid);
     let ts_before = Instant::now();
-    let object_get_resp = ipfs_client
-        .object_get(cid)
-        .await
-        .map_err(|err| anyhow!("{}", err))
-        .context("unable to object get")?;
+    let object_get_resp =
+        tokio::time::timeout(timeouts.block_download, ipfs_client.object_get(cid))
+            .await
+            .context("timeout")?
+            .map_err(|err| anyhow!("{}", err))
+            .context("unable to object get")?;
     let dur_object_get = ts_before.elapsed();
     debug!(
         "{}: object get took {:?}, got {} links",
@@ -369,13 +381,17 @@ where
 
     debug!("{}: object data", cid);
     let ts_before = Instant::now();
-    let object_data_resp = ipfs_client
-        .object_data(cid)
-        .map_ok(|chunk| chunk.to_vec())
-        .try_concat()
-        .await
-        .map_err(|err| anyhow!("{}", err))
-        .context("unable to object data")?;
+    let object_data_resp = tokio::time::timeout(
+        timeouts.block_download,
+        ipfs_client
+            .object_data(cid)
+            .map_ok(|chunk| chunk.to_vec())
+            .try_concat(),
+    )
+    .await
+    .context("timeout")?
+    .map_err(|err| anyhow!("{}", err))
+    .context("unable to object data")?;
     let dur_object_data = ts_before.elapsed();
     debug!(
         "{}: object data took {:?}, got {} bytes",

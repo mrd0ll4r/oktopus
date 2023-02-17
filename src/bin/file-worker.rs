@@ -12,7 +12,7 @@ use ipfs_indexer::queue::FileMessage;
 use ipfs_indexer::redis::RedisConnection;
 use ipfs_indexer::{
     db, hash, ipfs, logging, prom, queue, redis, CIDParts, CacheCheckResult, IpfsApiClient,
-    WorkerConnections,
+    Timeouts, WorkerConnections,
 };
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
@@ -21,7 +21,7 @@ use reqwest::{Client, Url};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,14 +41,10 @@ Static configuration is taken from a .env file, see the README for more informat
 
     let failure_threshold = ipfs_indexer::failed_file_downloads_threshold_from_env()
         .context("unable to determine failed DAG downloads threshold")?;
-    let block_download_timeout = ipfs_indexer::file_worker_ipfs_timeout_secs_from_env()
-        .context("unable to determine block download timeout")?;
-    let file_head_timeout = ipfs_indexer::file_worker_head_timeout_secs_from_env()
-        .context("unable to determine file HEAD timeout")?;
-    let file_download_timeout = ipfs_indexer::file_worker_download_timeout_secs_from_env()
-        .context("unable to determine file download timeout")?;
     let file_size_limit =
         ipfs_indexer::file_size_limit_from_env().context("unable to determine file size limit")?;
+    let timeouts =
+        Arc::new(Timeouts::from_env().context("unable to load timeouts from environment")?);
 
     // Create and/or clear temp storage directory
     let temp_storage_path = Path::new("/ipfs-indexer/tmp");
@@ -96,7 +92,7 @@ Static configuration is taken from a .env file, see the README for more informat
         api_client,
         ipfs_api_backend_hyper::GlobalOptions {
             offline: None,
-            timeout: Some(Duration::from_secs(block_download_timeout)),
+            timeout: Some(timeouts.block_download),
         },
     );
     let ipfs_api_download_client = Arc::new(api_client_with_timeout);
@@ -197,6 +193,7 @@ Static configuration is taken from a .env file, see the README for more informat
         let gateway_base_url = gateway_url.clone();
         let temp_storage_path = temp_storage_path.clone();
         let currently_running_tasks = currently_running_tasks.clone();
+        let timeouts = timeouts.clone();
 
         tokio::spawn(async move {
             handle_delivery(
@@ -212,9 +209,8 @@ Static configuration is taken from a .env file, see the README for more informat
                 gateway_client,
                 gateway_base_url,
                 file_size_limit,
-                Duration::from_secs(file_head_timeout),
-                Duration::from_secs(file_download_timeout),
                 temp_storage_path,
+                timeouts,
             )
             .await
         });
@@ -236,9 +232,8 @@ async fn handle_delivery<S, T>(
     gateway_client: reqwest::Client,
     gateway_base_url: Url,
     file_size_limit: u64,
-    download_head_timeout: Duration,
-    download_get_timeout: Duration,
     temp_file_dir: Arc<PathBuf>,
+    timeouts: Arc<Timeouts>,
 ) where
     S: IpfsApi + Sync,
     T: IpfsApi + Sync,
@@ -289,9 +284,8 @@ async fn handle_delivery<S, T>(
         gateway_client,
         gateway_base_url,
         file_size_limit,
-        download_head_timeout,
-        download_get_timeout,
         temp_file_dir,
+        timeouts,
     )
     .await;
 
@@ -406,9 +400,8 @@ async fn handle_file<S, T>(
     gateway_client: reqwest::Client,
     gateway_base_url: Url,
     file_size_limit: u64,
-    download_head_timeout: Duration,
-    download_get_timeout: Duration,
     temp_file_dir: Arc<PathBuf>,
+    timeouts: Arc<Timeouts>,
 ) -> TaskOutcome
 where
     S: IpfsApi + Sync,
@@ -495,11 +488,10 @@ where
         gateway_client,
         gateway_base_url,
         file_size_limit,
-        download_head_timeout,
-        download_get_timeout,
         temp_file_dir,
         cid_parts,
         &cid,
+        timeouts,
     )
     .await
     {
@@ -619,11 +611,10 @@ async fn download_file<S, T>(
     gateway_client: reqwest::Client,
     gateway_base_url: Url,
     file_size_limit: u64,
-    download_head_timeout: Duration,
-    download_get_timeout: Duration,
     temp_file_dir: Arc<PathBuf>,
     cid_parts: CIDParts,
     cid: &String,
+    timeouts: Arc<Timeouts>,
 ) -> Result<Result<FileMetadataFull, SkipReason>, FailureReason>
 where
     S: IpfsApi + Sync,
@@ -640,10 +631,9 @@ where
         gateway_client,
         &gateway_base_url,
         file_size_limit,
-        download_head_timeout,
-        download_get_timeout,
         &cid,
         &file_path,
+        timeouts.clone(),
     )
     .await;
     // Make sure to remove the file again
@@ -673,6 +663,7 @@ where
         cid_parts.codec,
         None,
         ipfs_api_download_client.clone(),
+        timeouts,
     )
     .await
     .map_err(|err| {
@@ -705,10 +696,9 @@ async fn download_and_analyze_file<T>(
     gateway_client: Client,
     gateway_base_url: &Url,
     file_size_limit: u64,
-    download_head_timeout: Duration,
-    download_get_timeout: Duration,
     cid: &str,
     file_path: &PathBuf,
+    timeouts: Arc<Timeouts>,
 ) -> Result<Result<FileMetadata, SkipReason>, FailureReason>
 where
     T: IpfsApi + Sync,
@@ -723,9 +713,8 @@ where
         gateway_client.clone(),
         &gateway_base_url,
         file_size_limit.clone(),
-        download_head_timeout.clone(),
-        download_get_timeout.clone(),
         &file_path,
+        timeouts,
     )
     .await
     .map_err(|e| {

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use thiserror::Error;
 
 #[macro_use]
@@ -333,6 +334,31 @@ fn get_u64_from_env(key: &str) -> anyhow::Result<u64> {
     Ok(res)
 }
 
+/// Contains all the timeouts configured via the environment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Timeouts {
+    pub block_download: Duration,
+    pub file_head: Duration,
+    pub file_download: Duration,
+    pub directory_download: Duration,
+}
+
+impl Timeouts {
+    pub fn from_env() -> anyhow::Result<Timeouts> {
+        let block_download_secs = block_worker_ipfs_timeout_secs_from_env()?;
+        let file_head_secs = file_worker_head_timeout_secs_from_env()?;
+        let file_download_secs = file_worker_download_timeout_secs_from_env()?;
+        let directory_download_secs = directory_worker_ipfs_timeout_secs_from_env()?;
+
+        Ok(Timeouts {
+            block_download: Duration::from_secs(block_download_secs),
+            file_head: Duration::from_secs(file_head_secs),
+            file_download: Duration::from_secs(file_download_secs),
+            directory_download: Duration::from_secs(directory_download_secs),
+        })
+    }
+}
+
 pub fn directory_full_ls_size_limit_from_env() -> anyhow::Result<u64> {
     get_u64_from_env("INDEXER_DIRECTORY_FULL_LS_SIZE_LIMIT")
 }
@@ -357,26 +383,18 @@ pub fn failed_hamtshard_downloads_threshold_from_env() -> anyhow::Result<u64> {
     get_u64_from_env("INDEXER_FAILED_HAMTSHARD_DOWNLOAD_THRESHOLD")
 }
 
-pub fn block_worker_ipfs_timeout_secs_from_env() -> anyhow::Result<u64> {
+fn block_worker_ipfs_timeout_secs_from_env() -> anyhow::Result<u64> {
     get_u64_from_env("INDEXER_BLOCK_DOWNLOAD_TIMEOUT_SECS")
 }
 
-pub fn file_worker_ipfs_timeout_secs_from_env() -> anyhow::Result<u64> {
-    get_u64_from_env("INDEXER_FILE_DAG_BLOCK_DOWNLOAD_TIMEOUT_SECS")
-}
-
-pub fn file_worker_head_timeout_secs_from_env() -> anyhow::Result<u64> {
+fn file_worker_head_timeout_secs_from_env() -> anyhow::Result<u64> {
     get_u64_from_env("INDEXER_FILE_HEAD_TIMEOUT_SECS")
 }
 
-pub fn file_worker_download_timeout_secs_from_env() -> anyhow::Result<u64> {
+fn file_worker_download_timeout_secs_from_env() -> anyhow::Result<u64> {
     get_u64_from_env("INDEXER_FILE_DOWNLOAD_TIMEOUT_SECS")
 }
 
-pub fn directory_worker_ipfs_timeout_secs_from_env() -> anyhow::Result<u64> {
+fn directory_worker_ipfs_timeout_secs_from_env() -> anyhow::Result<u64> {
     get_u64_from_env("INDEXER_DIRECTORY_DOWNLOAD_TIMEOUT_SECS")
-}
-
-pub fn hamtshard_worker_ipfs_timeout_secs_from_env() -> anyhow::Result<u64> {
-    get_u64_from_env("INDEXER_HAMTSHARD_DOWNLOAD_TIMEOUT_SECS")
 }

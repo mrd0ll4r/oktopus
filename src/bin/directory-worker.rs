@@ -10,14 +10,14 @@ use ipfs_indexer::queue::{BlockMessage, DirectoryMessage, FileMessage, HamtShard
 use ipfs_indexer::redis::RedisConnection;
 use ipfs_indexer::{
     db, ipfs, logging, models, prom, queue, redis, CIDParts, CacheCheckResult, IpfsApiClient,
-    WorkerConnections,
+    Timeouts, WorkerConnections,
 };
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
 use log::{debug, info, warn};
 use std::iter;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,10 +35,10 @@ Static configuration is taken from a .env file, see the README for more informat
 
     let failure_threshold = ipfs_indexer::failed_directory_downloads_threshold_from_env()
         .context("unable to determine failed DAG downloads threshold")?;
-    let download_timeout = ipfs_indexer::directory_worker_ipfs_timeout_secs_from_env()
-        .context("unable to determine download timeout")?;
     let full_ls_size_limit = ipfs_indexer::directory_full_ls_size_limit_from_env()
         .context("unable to determine size limit for full directory listing")?;
+    let timeouts =
+        Arc::new(Timeouts::from_env().context("unable to load timeouts from environment")?);
 
     let daemon_uri = matches
         .get_one::<String>("daemon")
@@ -51,7 +51,7 @@ Static configuration is taken from a .env file, see the README for more informat
         client,
         ipfs_api_backend_hyper::GlobalOptions {
             offline: None,
-            timeout: Some(Duration::from_secs(download_timeout)),
+            timeout: Some(timeouts.directory_download),
         },
     );
     let client = Arc::new(client_with_timeout);
@@ -126,6 +126,7 @@ Static configuration is taken from a .env file, see the README for more informat
         let hamtshards_chan = hamtshards_chan.clone();
         let db_conn = db_conn.clone();
         let ipfs_client = client.clone();
+        let timeouts = timeouts.clone();
 
         tokio::spawn(async move {
             handle_delivery(
@@ -140,6 +141,7 @@ Static configuration is taken from a .env file, see the README for more informat
                 ipfs_client,
                 failure_threshold,
                 full_ls_size_limit,
+                timeouts,
             )
             .await
         });
@@ -160,6 +162,7 @@ async fn handle_delivery<T>(
     ipfs_client: Arc<T>,
     failure_threshold: u64,
     full_ls_size_limit: u64,
+    timeouts: Arc<Timeouts>,
 ) where
     T: IpfsApi + Sync,
 {
@@ -190,6 +193,7 @@ async fn handle_delivery<T>(
         ipfs_client,
         failure_threshold,
         full_ls_size_limit,
+        timeouts,
     )
     .await;
 
@@ -290,6 +294,7 @@ async fn handle_directory<T>(
     ipfs_client: Arc<T>,
     failure_threshold: u64,
     full_ls_size_limit: u64,
+    timeouts: Arc<Timeouts>,
 ) -> TaskOutcome
 where
     T: IpfsApi + Sync,
@@ -348,7 +353,9 @@ where
         );
 
         let entries =
-            match fast_index_and_insert(redis_conn, db_conn, ipfs_client, db_block, &cid).await {
+            match fast_index_and_insert(redis_conn, db_conn, ipfs_client, db_block, &cid, timeouts)
+                .await
+            {
                 Ok(entries) => entries,
                 Err(res) => return Failed(res),
             };
@@ -409,7 +416,9 @@ where
                     "{}: incomplete block-level metadata for directory, attempting to download",
                     cid
                 );
-                match index_and_insert(redis_conn, db_conn, ipfs_client, db_block, &cid).await {
+                match index_and_insert(redis_conn, db_conn, ipfs_client, db_block, &cid, timeouts)
+                    .await
+                {
                     Ok(entries) => match entries {
                         Ok(entries) => entries,
                         Err(skip_reason) => return Skipped(skip_reason),
@@ -435,7 +444,8 @@ where
                 cid
             );
 
-            match index_and_insert(redis_conn, db_conn, ipfs_client, db_block, &cid).await {
+            match index_and_insert(redis_conn, db_conn, ipfs_client, db_block, &cid, timeouts).await
+            {
                 Ok(entries) => match entries {
                     Ok(entries) => entries,
                     Err(skip_reason) => return Skipped(skip_reason),
@@ -528,6 +538,7 @@ async fn index_and_insert<T>(
     ipfs_client: Arc<T>,
     db_block: Block,
     cid: &String,
+    timeouts: Arc<Timeouts>,
 ) -> Result<
     Result<Vec<(DirectoryEntry, Cid, Block, BlockStat, Vec<BlockLink>)>, SkipReason>,
     FailureReason,
@@ -536,8 +547,13 @@ where
     T: IpfsApi + Sync,
 {
     let start_ts = chrono::Utc::now();
-    let listing = match ipfs::query_ipfs_for_directory_listing(&cid, ipfs_client.clone(), true)
-        .await
+    let listing = match ipfs::query_ipfs_for_directory_listing(
+        &cid,
+        ipfs_client.clone(),
+        true,
+        timeouts.clone(),
+    )
+    .await
     {
         Ok(listing) => listing,
         Err(err) => {
@@ -566,6 +582,7 @@ where
             &child_cid,
             cidparts.codec,
             ipfs_client.clone(),
+            timeouts.clone(),
         )
         .await
         {
@@ -635,28 +652,34 @@ async fn fast_index_and_insert<T>(
     ipfs_client: Arc<T>,
     db_block: Block,
     cid: &String,
+    timeouts: Arc<Timeouts>,
 ) -> Result<Vec<(DirectoryEntry, Cid, Block)>, FailureReason>
 where
     T: IpfsApi + Sync,
 {
     let start_ts = chrono::Utc::now();
-    let listing = match ipfs::query_ipfs_for_directory_listing(&cid, ipfs_client.clone(), false)
-        .await
-    {
-        Ok(listing) => listing,
-        Err(err) => {
-            debug!("{}: failed to list directory: {:?}", cid, err);
+    let listing =
+        match ipfs::query_ipfs_for_directory_listing(&cid, ipfs_client.clone(), false, timeouts)
+            .await
+        {
+            Ok(listing) => listing,
+            Err(err) => {
+                debug!("{}: failed to list directory: {:?}", cid, err);
 
-            db::async_insert_dag_download_failure(db_conn.clone(), db_block.id, chrono::Utc::now())
+                db::async_insert_dag_download_failure(
+                    db_conn.clone(),
+                    db_block.id,
+                    chrono::Utc::now(),
+                )
                 .await
                 .expect("unable to insert download failure into database");
-            debug!("{}: marked failed in database", cid);
+                debug!("{}: marked failed in database", cid);
 
-            redis_mark_failed(&cid, redis_conn).await;
+                redis_mark_failed(&cid, redis_conn).await;
 
-            return Err(FailureReason::DownloadFailed);
-        }
-    };
+                return Err(FailureReason::DownloadFailed);
+            }
+        };
     let end_ts = chrono::Utc::now();
     debug!("{}: got directory listing {:?}", cid, listing);
 

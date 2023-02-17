@@ -9,7 +9,7 @@ use ipfs_indexer::prom::OutcomeLabel;
 use ipfs_indexer::queue::{BlockMessage, HamtShardMessage};
 use ipfs_indexer::redis::RedisConnection;
 use ipfs_indexer::{
-    db, ipfs, logging, prom, queue, redis, CIDParts, CacheCheckResult, IpfsApiClient,
+    db, ipfs, logging, prom, queue, redis, CIDParts, CacheCheckResult, IpfsApiClient, Timeouts,
     WorkerConnections,
 };
 use lapin::message::Delivery;
@@ -17,7 +17,7 @@ use lapin::options::{BasicAckOptions, BasicNackOptions};
 use log::{debug, info, warn};
 use std::iter;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,8 +35,8 @@ Static configuration is taken from a .env file, see the README for more informat
 
     let failure_threshold = ipfs_indexer::failed_hamtshard_downloads_threshold_from_env()
         .context("unable to determine failed DAG downloads threshold")?;
-    let download_timeout = ipfs_indexer::hamtshard_worker_ipfs_timeout_secs_from_env()
-        .context("unable to determine download timeout")?;
+    let timeouts =
+        Arc::new(Timeouts::from_env().context("unable to load timeouts from environment")?);
 
     let daemon_uri = matches
         .get_one::<String>("daemon")
@@ -49,7 +49,7 @@ Static configuration is taken from a .env file, see the README for more informat
         client,
         ipfs_api_backend_hyper::GlobalOptions {
             offline: None,
-            timeout: Some(Duration::from_secs(download_timeout)),
+            timeout: Some(timeouts.directory_download),
         },
     );
     let client = Arc::new(client_with_timeout);
@@ -108,6 +108,7 @@ Static configuration is taken from a .env file, see the README for more informat
         let daemon_uri = daemon_uri.clone();
         let db_conn = db_conn.clone();
         let ipfs_client = client.clone();
+        let timeouts = timeouts.clone();
 
         tokio::spawn(async move {
             handle_delivery(
@@ -118,6 +119,7 @@ Static configuration is taken from a .env file, see the README for more informat
                 db_conn,
                 ipfs_client,
                 failure_threshold,
+                timeouts,
             )
             .await
         });
@@ -134,6 +136,7 @@ async fn handle_delivery<T>(
     db_conn: Arc<Mutex<PgConnection>>,
     ipfs_client: Arc<T>,
     failure_threshold: u64,
+    timeouts: Arc<Timeouts>,
 ) where
     T: IpfsApi + Sync,
 {
@@ -160,6 +163,7 @@ async fn handle_delivery<T>(
         db_conn,
         ipfs_client,
         failure_threshold,
+        timeouts,
     )
     .await;
 
@@ -246,6 +250,7 @@ async fn handle_hamtshard<T>(
     db_conn: Arc<Mutex<PgConnection>>,
     ipfs_client: Arc<T>,
     failure_threshold: u64,
+    timeouts: Arc<Timeouts>,
 ) -> TaskOutcome
 where
     T: IpfsApi + Sync,
@@ -312,6 +317,7 @@ where
                 db_block.clone(),
                 &cid,
                 &cid_parts,
+                timeouts,
             )
             .await
             {
@@ -389,13 +395,19 @@ async fn fast_index_and_insert<T>(
     db_block: Block,
     cid: &String,
     cid_parts: &CIDParts,
+    timeouts: Arc<Timeouts>,
 ) -> Result<Result<Vec<(DirectoryEntry, Cid, Block)>, SkipReason>, FailureReason>
 where
     T: IpfsApi + Sync,
 {
     let start_ts = chrono::Utc::now();
-    let listing = match ipfs::query_ipfs_for_directory_listing(&cid, ipfs_client.clone(), false)
-        .await
+    let listing = match ipfs::query_ipfs_for_directory_listing(
+        &cid,
+        ipfs_client.clone(),
+        false,
+        timeouts.clone(),
+    )
+    .await
     {
         Ok(listing) => listing,
         Err(err) => {
@@ -431,6 +443,7 @@ where
         cid_parts.codec,
         Some(listing_cids),
         ipfs_client.clone(),
+        timeouts,
     )
     .await
     .map_err(|err| {
