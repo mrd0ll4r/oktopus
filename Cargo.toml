@@ -29,7 +29,7 @@ cid = { version = "0.8.5", features = ["serde-codec"] }
 # Multihash, to parse hashes stored in the database
 multihash = { version = "0.16.3" }
 # Reqwest, to download file data via the IPFS HTTP Gateway
-reqwest = {version="0.11.14", features=["rustls-tls","stream"]}
+reqwest = { version = "0.11.14", default-features = false, features = ["rustls-tls", "stream"] }
 
 ## MIME detectors
 tree_magic_mini = "3.0.3"
