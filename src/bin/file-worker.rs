@@ -744,6 +744,22 @@ where
     let download_finished_ts = chrono::Utc::now();
     debug!("{}: downloaded {} bytes via gateway", cid, file_size);
 
+    // Sanity check: Does the file have the correct size?
+    let fs_metadata = tokio::fs::metadata(file_path).await.map_err(|err| {
+        error!("{}: unable to stat downloaded file: {:?}", cid, err);
+        FailureReason::DownloadFailed
+    })?;
+    if fs_metadata.len() != file_size {
+        error!(
+            "{}: downloaded {} bytes, but file has {} bytes",
+            cid,
+            file_size,
+            fs_metadata.len()
+        );
+
+        return Err(FailureReason::DownloadFailed);
+    }
+
     // TODO sanity-check filesize from... sum of child blocks, maybe? with some tolerance?
 
     // Compute heuristics, hash, alternative CIDs

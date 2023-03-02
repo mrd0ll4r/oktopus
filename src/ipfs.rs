@@ -3,7 +3,7 @@ use anyhow::{anyhow, Context};
 use futures_util::TryStreamExt;
 use ipfs_api_backend_hyper::response::IpfsHeader;
 use ipfs_api_backend_hyper::IpfsApi;
-use log::{debug, trace, warn};
+use log::{debug, error, trace, warn};
 use prost::Message;
 use reqwest::Url;
 use std::borrow::BorrowMut;
@@ -109,7 +109,7 @@ pub async fn query_ipfs_for_file_data(
     file_size_limit: u64,
     file_path: &Path,
     timeouts: Arc<Timeouts>,
-) -> anyhow::Result<std::result::Result<(i64, chrono::DateTime<chrono::Utc>), i64>> {
+) -> anyhow::Result<std::result::Result<(u64, chrono::DateTime<chrono::Utc>), i64>> {
     let url = build_gateway_url(gateway_base_url, c);
     debug!("{}: requesting via IPFS gateway at {}...", c, url);
 
@@ -159,6 +159,31 @@ pub async fn query_ipfs_for_file_data(
             e
         })?;
 
+    if let Some(size) = advertised_file_size {
+        if file_size == 0 && size != 0 {
+            // This is probably a bug somewhere.
+            error!(
+                "{}: downloaded zero bytes, but HEAD advertised {} bytes",
+                c, size
+            );
+
+            if let Err(e) = std::fs::remove_file(file_path) {
+                warn!(
+                    "{}: unable to remove incomplete temp file {:?}: {:?}",
+                    c, file_path, e
+                )
+            }
+
+            return Err(anyhow!("downloaded zero bytes for file with non-zero size"));
+        } else if file_size != size {
+            // This might be a bug?
+            warn!(
+                "{}: downloaded {} bytes, but HEAD advertised {} bytes",
+                c, file_size, size
+            );
+        }
+    }
+
     Ok(Ok((file_size, head_finished_ts)))
 }
 
@@ -167,7 +192,7 @@ async fn perform_gateway_download(
     mut response: reqwest::Response,
     download_timeout: Duration,
     file_path: &Path,
-) -> anyhow::Result<i64> {
+) -> anyhow::Result<u64> {
     let mut file = tokio::fs::File::create(file_path)
         .await
         .context("unable to create file")?;
@@ -179,7 +204,7 @@ async fn perform_gateway_download(
             Ok(result) => {
                 if let Some(mut chunk) = result.context("unable to read response body")? {
                     trace!("{}: received chunk of {} bytes", c, chunk.len());
-                    n += chunk.len() as i64;
+                    n += chunk.len() as u64;
                     file.write_all_buf(chunk.borrow_mut())
                         .await
                         .context("unable to write temp file")?;
@@ -194,6 +219,8 @@ async fn perform_gateway_download(
             }
         }
     }
+
+    file.flush().await.context("unable to flush temp file")?;
 
     Ok(n)
 }
