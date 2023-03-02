@@ -47,6 +47,7 @@ services:
       - ./.env:/ipfs-indexer/.env
     environment:
       - RUST_LOG=info
+      - RUST_BACKTRACE=full
 
   daemon01_worker_dummy: &daemon01_worker
     <<: *basic_worker
