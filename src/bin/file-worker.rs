@@ -245,6 +245,7 @@ async fn handle_delivery<S, T>(
     T: IpfsApi + Sync,
 {
     let Delivery {
+        delivery_tag,
         data,
         acker,
         redelivered,
@@ -279,6 +280,7 @@ async fn handle_delivery<S, T>(
 
     let before = Instant::now();
     let outcome = handle_file(
+        delivery_tag,
         msg,
         redelivered,
         &mut redis_conn,
@@ -395,6 +397,7 @@ impl OutcomeLabel for TaskOutcome {
 }
 
 async fn handle_file<S, T>(
+    delivery_tag: u64,
     msg: FileMessage,
     redelivered: bool,
     redis_conn: &mut RedisConnection,
@@ -489,6 +492,7 @@ where
         layers,
         dag_block_cids,
     ) = match download_file(
+        delivery_tag,
         ipfs_api_download_client,
         ipfs_api_upload_client,
         gateway_client,
@@ -612,6 +616,7 @@ struct FileMetadata {
 }
 
 async fn download_file<S, T>(
+    delivery_tag: u64,
     ipfs_api_download_client: Arc<S>,
     ipfs_api_upload_client: Arc<T>,
     gateway_client: reqwest::Client,
@@ -628,7 +633,7 @@ where
 {
     let file_path = {
         let mut temp_file_dir = temp_file_dir.to_path_buf();
-        temp_file_dir.push(cid);
+        temp_file_dir.push(format!("{}_{}", cid, delivery_tag));
         temp_file_dir
     };
 
@@ -784,8 +789,8 @@ where
     debug!("{}: computed alternative CIDs {:?}", cid, alternative_cids);
     let alternative_cids_normalized = alternative_cids.normalized_cids().map_err(|err| {
         warn!(
-            "unable to get normalized CIDs for alternative CIDs {:?} for file {}: {:?}",
-            alternative_cids, cid, err
+            "unable to get normalized CIDs for alternative CIDs {:?} for file {:?}: {:?}",
+            alternative_cids, file_path, err
         );
         FailureReason::FailedToComputeAlternativeCids
     })?;
