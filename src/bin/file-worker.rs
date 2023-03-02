@@ -1,5 +1,5 @@
 use crate::TaskOutcome::{Done, Failed, Skipped};
-use anyhow::{ensure, Context};
+use anyhow::{anyhow, ensure, Context};
 use clap::{arg, Command};
 use diesel::PgConnection;
 use futures_util::StreamExt;
@@ -16,12 +16,13 @@ use ipfs_indexer::{
 };
 use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use reqwest::{Client, Url};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::io::AsyncReadExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -52,7 +53,12 @@ Static configuration is taken from a .env file, see the README for more informat
         temp_storage_path.is_dir(),
         "temporary file storage directory missing"
     );
+
     // Test if we can write to it
+    debug!(
+        "checking if we can write to temp storage at {:?}...",
+        temp_storage_path
+    );
     let mut tmp_file_path = temp_storage_path.to_path_buf();
     tmp_file_path.push("test.foo");
     std::fs::File::create(&tmp_file_path)
@@ -340,7 +346,7 @@ enum FailureReason {
     FailedToComputeHash,
     FailedToComputeAlternativeCids,
     FailedToDetectFreedesktopMimeType,
-    FailedToDetectLibmimeMimeType,
+    FailedToDetectLibmagicMimeType,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -376,8 +382,8 @@ impl OutcomeLabel for TaskOutcome {
                 FailureReason::FailedToComputeAlternativeCids => {
                     "failed_to_compute_alternative_cids"
                 }
-                FailureReason::FailedToDetectLibmimeMimeType => {
-                    "failed_to_detect_libmime_mime_type"
+                FailureReason::FailedToDetectLibmagicMimeType => {
+                    "failed_to_detect_libmagic_mime_type"
                 }
                 FailureReason::FailedToComputeHash => "failed_to_compute_hash",
                 FailureReason::FailedToDetectFreedesktopMimeType => {
@@ -736,26 +742,29 @@ where
     // TODO sanity-check filesize from... sum of child blocks, maybe? with some tolerance?
 
     // Compute heuristics, hash, alternative CIDs
-    let freedesktop_mime_type = get_freedesktop_mime_type_async(&file_path)
-        .await
-        .ok_or_else(|| {
-            warn!("unable to detect freedesktop MIME type for file {}", cid);
-            FailureReason::FailedToDetectFreedesktopMimeType
-        })?;
-
-    let libmime_mime_type = get_libmime_mime_type_async(&file_path)
+    let freedesktop_mime_type = get_freedesktop_mime_type_async(&file_path, file_size)
         .await
         .map_err(|err| {
             warn!(
-                "unable to detect libmime MIME type for file {}: {:?}",
-                cid, err
+                "unable to detect freedesktop MIME type for file {:?}: {:?}",
+                file_path, err
             );
-            FailureReason::FailedToDetectLibmimeMimeType
+            FailureReason::FailedToDetectFreedesktopMimeType
+        })?;
+
+    let libmagic_mime_type = get_libmagic_mime_type_async(&file_path, file_size)
+        .await
+        .map_err(|err| {
+            warn!(
+                "unable to detect libmagic MIME type for file {:?}: {:?}",
+                file_path, err
+            );
+            FailureReason::FailedToDetectLibmagicMimeType
         })?;
 
     debug!(
-        "{}: detected MIME types {} (freedesktop), {} (libmime)",
-        cid, freedesktop_mime_type, libmime_mime_type
+        "{}: detected MIME types {} (freedesktop), {} (libmagic)",
+        cid, freedesktop_mime_type, libmagic_mime_type
     );
     let sha256_hash = hash::compute_sha256(&file_path).await.map_err(|err| {
         warn!("unable to compute SHA256 hash for file {}: {:?}", cid, err);
@@ -787,14 +796,14 @@ where
         download_finished_ts,
         end_ts: chrono::Utc::now(),
         freedesktop_mime_type,
-        libmime_mime_type,
-        file_size,
+        libmime_mime_type: libmagic_mime_type,
+        file_size: file_size as i64,
         sha256_hash,
         alternative_cids_normalized,
     }))
 }
 
-fn set_up_libmime_detector() -> anyhow::Result<magic::Cookie> {
+fn set_up_libmagic_detector() -> anyhow::Result<magic::Cookie> {
     // Create configuration
     let cookie = magic::Cookie::open(
         // Treat some OS errors as real errors instead of hiding them somewhere.
@@ -802,31 +811,73 @@ fn set_up_libmime_detector() -> anyhow::Result<magic::Cookie> {
             // Return a MIME type string.
             magic::CookieFlags::MIME_TYPE,
     )
-    .context("unable to set up libmime detector")?;
+    .context("unable to set up libmagic detector")?;
 
     // Load the default database.
     cookie
         .load::<&str>(&[])
-        .context("unable to load libmime database")?;
+        .context("unable to load libmagic database")?;
 
     Ok(cookie)
 }
 
-pub async fn get_freedesktop_mime_type_async(file_path: &Path) -> Option<&'static str> {
-    tokio::task::block_in_place(|| tree_magic_mini::from_filepath(file_path))
+async fn read_file_head(
+    file_path: &Path,
+    file_size: u64,
+    num_bytes_to_read: u64,
+) -> anyhow::Result<Vec<u8>> {
+    let f = tokio::fs::File::open(file_path)
+        .await
+        .context("unable to open file")?;
+    let mut buf = Vec::with_capacity(num_bytes_to_read as usize);
+    f.take(num_bytes_to_read)
+        .read_to_end(&mut buf)
+        .await
+        .context("unable to read file")?;
+
+    let expected_buffer_size = file_size.min(num_bytes_to_read) as usize;
+    if buf.len() != expected_buffer_size {
+        return Err(anyhow!(
+            "unable to read file head, wanted {} bytes, got {} bytes",
+            expected_buffer_size,
+            buf.len()
+        ));
+    }
+
+    Ok(buf)
 }
 
-pub async fn get_libmime_mime_type_async(file_path: &Path) -> anyhow::Result<String> {
-    tokio::task::block_in_place(|| get_libmime_mime_type(file_path))
+pub async fn get_freedesktop_mime_type_async(
+    file_path: &Path,
+    file_size: u64,
+) -> anyhow::Result<&'static str> {
+    // We read 2K because that's what tree_magic would do if we were to give it a file path.
+    let buf = read_file_head(file_path, file_size, 2048)
+        .await
+        .context("unable to read file")?;
+
+    Ok(tree_magic_mini::from_u8(&buf))
 }
 
-pub fn get_libmime_mime_type(file_path: &Path) -> anyhow::Result<String> {
-    // Set up libmime detector
-    let libmime_detector =
-        set_up_libmime_detector().context("unable to set up libmime detector")?;
+pub async fn get_libmagic_mime_type_async(
+    file_path: &Path,
+    file_size: u64,
+) -> anyhow::Result<String> {
+    // We read 256K, because that's what libmagic would do if we were to give it a file path.
+    let buf = read_file_head(file_path, file_size, 256 * 1024)
+        .await
+        .context("unable to read file")?;
 
-    let libmime_mime_type = libmime_detector
-        .file(file_path)
+    tokio::task::block_in_place(|| get_libmagic_mime_type(buf))
+}
+
+pub fn get_libmagic_mime_type(buf: Vec<u8>) -> anyhow::Result<String> {
+    // Set up detector
+    let libmagic_detector =
+        set_up_libmagic_detector().context("unable to set up libmagic detector")?;
+
+    let libmime_mime_type = libmagic_detector
+        .buffer(&buf)
         .context("failed to detect mime type")?;
 
     Ok(libmime_mime_type)

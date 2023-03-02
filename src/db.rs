@@ -115,7 +115,7 @@ pub async fn async_upsert_successful_file(
     mime_cache: Arc<Mutex<MimeTypeCache>>,
     p_block_id: i64,
     freedesktop_mime_type: &'static str,
-    libmime_mime_type: String,
+    libmagic_mime_type: String,
     file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids: Vec<NormalizedAlternativeCid>,
@@ -146,7 +146,7 @@ pub async fn async_upsert_successful_file(
             &mut cache,
             p_block_id,
             freedesktop_mime_type,
-            libmime_mime_type,
+            libmagic_mime_type,
             file_size,
             sha256_hash,
             alternative_cids,
@@ -299,7 +299,7 @@ pub fn upsert_successful_file(
     mime_cache: &mut MimeTypeCache,
     p_block_id: i64,
     freedesktop_mime_type: &str,
-    libmime_mime_type: String,
+    libmagic_mime_type: String,
     file_size: i64,
     sha256_hash: Vec<u8>,
     alternative_cids: Vec<NormalizedAlternativeCid>,
@@ -321,14 +321,14 @@ pub fn upsert_successful_file(
     conn.transaction::<(), diesel::result::Error, _>(|conn| {
         // Determine MIME type IDs
         let freedesktop_mime_type_id = mime_cache.lookup_or_insert(conn, freedesktop_mime_type)?;
-        let libmime_mime_type_id = mime_cache.lookup_or_insert(conn, &libmime_mime_type)?;
+        let libmagic_mime_type_id = mime_cache.lookup_or_insert(conn, &libmagic_mime_type)?;
 
         // Insert MIME type and file size
         insert_block_file_metadata_idempotent(
             conn,
             p_block_id,
             freedesktop_mime_type_id,
-            libmime_mime_type_id,
+            libmagic_mime_type_id,
             file_size,
         )?;
 
@@ -378,7 +378,7 @@ fn insert_block_file_metadata_idempotent(
     conn: &mut PgConnection,
     p_block_id: i64,
     p_freedesktop_mime_type_id: i32,
-    p_libmime_mime_type_id: i32,
+    p_libmagic_mime_type_id: i32,
     file_size: i64,
 ) -> Result<(), diesel::result::Error> {
     use crate::schema::block_file_metadata;
@@ -386,7 +386,7 @@ fn insert_block_file_metadata_idempotent(
     let new_metadata = NewBlockFileMetadata {
         block_id: &p_block_id,
         freedesktop_mime_type_id: &p_freedesktop_mime_type_id,
-        libmime_mime_type_id: &p_libmime_mime_type_id,
+        libmagic_mime_type_id: &p_libmagic_mime_type_id,
         file_size: &file_size,
     };
 

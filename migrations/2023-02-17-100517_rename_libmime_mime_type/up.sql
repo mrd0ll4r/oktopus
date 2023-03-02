@@ -1,0 +1,1 @@
+ALTER TABLE block_file_metadata RENAME libmime_mime_type_id TO libmagic_mime_type_id;

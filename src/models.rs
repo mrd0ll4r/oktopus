@@ -169,7 +169,7 @@ pub struct BlockFileMetadata {
     pub block_id: i64,
     pub freedesktop_mime_type_id: i32,
     pub file_size: Option<i64>,
-    pub libmime_mime_type_id: i32,
+    pub libmagic_mime_type_id: i32,
 }
 
 #[derive(Insertable, Debug)]
@@ -178,7 +178,7 @@ pub struct NewBlockFileMetadata<'a> {
     pub block_id: &'a i64,
     pub freedesktop_mime_type_id: &'a i32,
     pub file_size: &'a i64,
-    pub libmime_mime_type_id: &'a i32,
+    pub libmagic_mime_type_id: &'a i32,
 }
 
 #[derive(

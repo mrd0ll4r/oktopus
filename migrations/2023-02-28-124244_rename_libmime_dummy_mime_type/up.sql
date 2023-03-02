@@ -1,0 +1,1 @@
+UPDATE mime_types SET name = 'unknown/pre-libmagic-schema' WHERE name = 'unknown/pre-libmime-schema';

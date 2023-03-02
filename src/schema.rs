@@ -22,7 +22,7 @@ diesel::table! {
         block_id -> Int8,
         freedesktop_mime_type_id -> Int4,
         file_size -> Nullable<Int8>,
-        libmime_mime_type_id -> Int4,
+        libmagic_mime_type_id -> Int4,
     }
 }
 
