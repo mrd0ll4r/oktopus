@@ -787,10 +787,15 @@ where
         "{}: detected MIME types {} (freedesktop), {} (libmagic)",
         cid, freedesktop_mime_type, libmagic_mime_type
     );
-    let sha256_hash = hash::compute_sha256(&file_path).await.map_err(|err| {
-        warn!("unable to compute SHA256 hash for file {}: {:?}", cid, err);
-        FailureReason::FailedToComputeHash
-    })?;
+    let sha256_hash = hash::compute_sha256(&file_path, file_size)
+        .await
+        .map_err(|err| {
+            warn!(
+                "unable to compute SHA256 hash for file {:?}: {:?}",
+                file_path, err
+            );
+            FailureReason::FailedToComputeHash
+        })?;
     debug!("{}: computed SHA256 hash {:?}", cid, sha256_hash);
     let alternative_cids =
         hash::AlternativeCids::for_bytes(ipfs_api_upload_client.clone(), &file_path)

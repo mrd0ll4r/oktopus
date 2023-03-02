@@ -8,19 +8,29 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
-pub async fn compute_sha256(file_path: &Path) -> anyhow::Result<Vec<u8>> {
+pub async fn compute_sha256(file_path: &Path, file_size: u64) -> anyhow::Result<Vec<u8>> {
     let mut hasher = Sha256::new();
     let mut file = tokio::fs::File::open(file_path)
         .await
         .context("unable to open file")?;
-    let mut buf = Vec::with_capacity(1024 * 1024 * 4);
+    let mut buf = [0; 4096];
+    let mut num_bytes_fed = 0;
 
     loop {
         let n = file.read(&mut buf).await.context("unable to read file")?;
         if n == 0 {
             break;
         }
+        num_bytes_fed += n as u64;
         hasher.update(&buf[..n]);
+    }
+
+    if num_bytes_fed != file_size {
+        return Err(anyhow!(
+            "file size mismatch: expected {} bytes, read {} bytes",
+            file_size,
+            num_bytes_fed
+        ));
     }
 
     Ok(hasher.finalize().into_iter().collect())
