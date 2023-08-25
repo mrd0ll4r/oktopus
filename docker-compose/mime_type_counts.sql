@@ -1,6 +1,6 @@
-SELECT m.name, COUNT(*)
+SELECT m.name, COUNT(*) as cnt
 FROM block_file_metadata f,
      mime_types m
-WHERE m.id = f.libmime_mime_type_id
+WHERE m.id = f.libmagic_mime_type_id
 GROUP BY m.name
-ORDER BY count DESC;
+ORDER BY cnt DESC;
