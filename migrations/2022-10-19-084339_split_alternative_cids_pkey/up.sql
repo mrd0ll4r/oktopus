@@ -54,6 +54,55 @@ SET hash_type_id = (SELECT id
 ALTER TABLE block_file_alternative_cids
     ALTER COLUMN hash_type_id SET NOT NULL;
 
+-- This contains duplicates.
+-- We figured out very late that `ipfs cat` with a timeout, via the HTTP API and the library we used,
+-- can potentially truncate file data. That's not great.
+-- That, in turn, causes different alternative CIDs to be generated.
+-- We can, however, use those different alternative CIDs for the same block and hash function to identify blocks where
+-- this has happened, _if_ we downloaded them more than once.
+-- This will also remove potentially correct file metadata from the database.
+-- The best thing we can do here is identify cases where it happened at least once.
+-- There will still be incomplete file data in the DB after this...
+
+CREATE TEMP TABLE potentially_incomplete_file_downloads
+(
+    block_id BIGINT PRIMARY KEY
+) ON COMMIT DROP;
+
+INSERT INTO potentially_incomplete_file_downloads (block_id)
+SELECT DISTINCT c1.block_id
+FROM block_file_alternative_cids c1,
+     block_file_alternative_cids c2
+WHERE c1.block_id = c2.block_id
+  AND c1.codec = c2.codec
+  AND c1.hash_type_id = c2.hash_type_id
+  AND c1.cid_v1 != c2.cid_v1;
+
+DO
+$$
+    DECLARE
+        num_mismatching_files BIGINT := 0;
+    BEGIN
+        num_mismatching_files := COUNT(*) FROM potentially_incomplete_file_downloads;
+        RAISE NOTICE 'Found % potentially incomplete file records, will remove', num_mismatching_files;
+    END;
+$$
+LANGUAGE plpgsql;
+
+DELETE
+FROM block_file_alternative_cids
+WHERE block_id IN (SELECT block_id FROM potentially_incomplete_file_downloads);
+DELETE
+FROM successful_downloads
+WHERE block_id IN (SELECT block_id FROM potentially_incomplete_file_downloads)
+  AND download_type_id = 2;
+DELETE
+FROM block_file_hashes
+WHERE block_id IN (SELECT block_id FROM potentially_incomplete_file_downloads);
+DELETE
+FROM block_file_metadata
+WHERE block_id IN (SELECT block_id FROM potentially_incomplete_file_downloads);
+
 -- Add unique index on (block_id, codec, hash_type_id)
 CREATE UNIQUE INDEX block_file_alternative_cids_block_id_codec_hash_type_id ON block_file_alternative_cids (block_id, codec, hash_type_id);
 
