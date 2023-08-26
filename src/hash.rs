@@ -115,37 +115,37 @@ impl AlternativeCids {
         .collect::<anyhow::Result<_>>()
     }
 
-    pub async fn for_bytes<T>(client: Arc<T>, file_path: &Path) -> anyhow::Result<AlternativeCids>
+    pub async fn for_path<T>(client: Arc<T>, file_path: &Path) -> anyhow::Result<AlternativeCids>
     where
         T: IpfsApi + Sync,
     {
-        let sha1_cid = Self::for_hash_function_and_bytes(client.clone(), "sha1", file_path).await?;
+        let sha1_cid = Self::for_hash_function_and_path(client.clone(), "sha1", file_path).await?;
         let sha2_256_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha2-256", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "sha2-256", file_path).await?;
         let sha2_512_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha2-512", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "sha2-512", file_path).await?;
         let sha3_224_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha3-224", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "sha3-224", file_path).await?;
         let sha3_256_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha3-256", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "sha3-256", file_path).await?;
         let sha3_384_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha3-384", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "sha3-384", file_path).await?;
         let sha3_512_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "sha3-512", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "sha3-512", file_path).await?;
         let dbl_sha2_256_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "dbl-sha2-256", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "dbl-sha2-256", file_path).await?;
         //let keccak_224_cid =
         //    Self::for_hash_function_and_bytes(client.clone(), "keccak-224", file_path).await?;
         let keccak_256_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "keccak-256", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "keccak-256", file_path).await?;
         //let keccak_384_cid =
         //    Self::for_hash_function_and_bytes(client.clone(), "keccak-384", file_path).await?;
         let keccak_512_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "keccak-512", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "keccak-512", file_path).await?;
         let blake3_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "blake3", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "blake3", file_path).await?;
         let shake_256_cid =
-            Self::for_hash_function_and_bytes(client.clone(), "shake-256", file_path).await?;
+            Self::for_hash_function_and_path(client.clone(), "shake-256", file_path).await?;
 
         Ok(AlternativeCids {
             sha1: sha1_cid,
@@ -165,7 +165,7 @@ impl AlternativeCids {
         })
     }
 
-    async fn for_hash_function_and_bytes<T>(
+    async fn for_hash_function_and_path<T>(
         client: Arc<T>,
         hash: &str,
         file_path: &Path,

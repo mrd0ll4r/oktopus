@@ -798,7 +798,7 @@ where
         })?;
     debug!("{}: computed SHA256 hash {:?}", cid, sha256_hash);
     let alternative_cids =
-        hash::AlternativeCids::for_bytes(ipfs_api_upload_client.clone(), &file_path)
+        hash::AlternativeCids::for_path(ipfs_api_upload_client.clone(), &file_path)
             .await
             .map_err(|err| {
                 warn!(
