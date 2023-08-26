@@ -24,7 +24,7 @@ diesel_migrations = "2.0.0"
 
 ## IPFS stuff
 # IPFS API client
-ipfs-api-backend-hyper = { version = "0.5", features = ["with-hyper-rustls", "with-send-sync"], default-features = false }
+ipfs-api-backend-hyper = { git = "https://github.com/mrd0ll4r/rust-ipfs-api.git", branch = "hyper-connection-pool", features = ["with-send-sync"], default-features = false }
 cid = { version = "0.8.5", features = ["serde-codec"] }
 # Multihash, to parse hashes stored in the database
 multihash = { version = "0.16.3" }

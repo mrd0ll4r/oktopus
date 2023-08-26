@@ -242,6 +242,12 @@ checksum = "4cbbc9d0964165b47557570cce6c952866c2678457aca742aafc9fb771d30270"
 
 [[package]]
 name = "base64"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
+
+[[package]]
+name = "base64"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4a4ddaa51a5bc52a6948f74c06d20aaaddb71924eab79b8c97a8c556e942d6a"
@@ -320,12 +326,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bs58"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "771fe0050b883fcc3ea2359b1a96bcfbc090b7116eae7c3c512c7a083fdf23d3"
-
-[[package]]
 name = "bumpalo"
 version = "3.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -402,7 +402,7 @@ dependencies = [
  "multihash 0.16.3",
  "serde",
  "serde_bytes",
- "unsigned-varint 0.7.1",
+ "unsigned-varint",
 ]
 
 [[package]]
@@ -461,7 +461,7 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "tokio",
- "tokio-util 0.7.7",
+ "tokio-util",
 ]
 
 [[package]]
@@ -969,7 +969,7 @@ dependencies = [
  "indexmap",
  "slab",
  "tokio",
- "tokio-util 0.7.7",
+ "tokio-util",
  "tracing",
 ]
 
@@ -1097,9 +1097,7 @@ checksum = "1788965e61b367cd03a62950836d5cd41560c3577d90e40e0819373194d1661c"
 dependencies = [
  "http",
  "hyper",
- "log",
  "rustls",
- "rustls-native-certs",
  "tokio",
  "tokio-rustls",
 ]
@@ -1179,26 +1177,24 @@ dependencies = [
 
 [[package]]
 name = "ipfs-api-backend-hyper"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "114341e043a87eff0e43ec192f0a495988323dc14c468448e62b20aaf96bd1e6"
+version = "0.6.0"
+source = "git+https://github.com/mrd0ll4r/rust-ipfs-api.git?branch=hyper-connection-pool#95371e952b99770878ffce92c7ea8550a674167d"
 dependencies = [
  "async-trait",
+ "base64 0.13.1",
  "bytes",
  "futures",
  "http",
  "hyper",
  "hyper-multipart-rfc7578",
- "hyper-rustls",
  "ipfs-api-prelude",
  "thiserror",
 ]
 
 [[package]]
 name = "ipfs-api-prelude"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbaf47fa129710ae041d5844a15b1365bdad8551673aee237449ba9dec6bcadc"
+version = "0.6.0"
+source = "git+https://github.com/mrd0ll4r/rust-ipfs-api.git?branch=hyper-connection-pool#95371e952b99770878ffce92c7ea8550a674167d"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1207,14 +1203,14 @@ dependencies = [
  "dirs",
  "futures",
  "http",
+ "multiaddr",
  "multibase",
- "parity-multiaddr",
  "serde",
  "serde_json",
  "serde_urlencoded",
  "thiserror",
  "tokio",
- "tokio-util 0.6.10",
+ "tokio-util",
  "tracing",
  "walkdir",
 ]
@@ -1448,6 +1444,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "multiaddr"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b36f567c7099511fa8612bbbb52dda2419ce0bdbacf31714e3a5ffdb766d3bd"
+dependencies = [
+ "arrayref",
+ "byteorder",
+ "data-encoding",
+ "log",
+ "multibase",
+ "multihash 0.17.0",
+ "percent-encoding",
+ "serde",
+ "static_assertions",
+ "unsigned-varint",
+ "url",
+]
+
+[[package]]
 name = "multibase"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1456,17 +1471,6 @@ dependencies = [
  "base-x",
  "data-encoding",
  "data-encoding-macro",
-]
-
-[[package]]
-name = "multihash"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dac63698b887d2d929306ea48b63760431ff8a24fac40ddb22f9c7f49fb7cab"
-dependencies = [
- "generic-array",
- "multihash-derive 0.7.2",
- "unsigned-varint 0.5.1",
 ]
 
 [[package]]
@@ -1480,26 +1484,23 @@ dependencies = [
  "blake3",
  "core2",
  "digest",
- "multihash-derive 0.8.1",
+ "multihash-derive",
  "serde",
  "serde-big-array",
  "sha2",
  "sha3",
- "unsigned-varint 0.7.1",
+ "unsigned-varint",
 ]
 
 [[package]]
-name = "multihash-derive"
-version = "0.7.2"
+name = "multihash"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "424f6e86263cd5294cbd7f1e95746b95aca0e0d66bff31e5a40d6baa87b4aa99"
+checksum = "835d6ff01d610179fbce3de1694d007e500bf33a7f29689838941d6bf783ae40"
 dependencies = [
- "proc-macro-crate",
- "proc-macro-error",
- "proc-macro2",
- "quote",
- "syn",
- "synstructure",
+ "core2",
+ "multihash-derive",
+ "unsigned-varint",
 ]
 
 [[package]]
@@ -1603,24 +1604,6 @@ dependencies = [
  "rc2",
  "sha1 0.10.5",
  "yasna",
-]
-
-[[package]]
-name = "parity-multiaddr"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58341485071825827b7f03cf7efd1cb21e6a709bea778fb50227fd45d2f361b4"
-dependencies = [
- "arrayref",
- "bs58",
- "byteorder",
- "data-encoding",
- "multihash 0.13.2",
- "percent-encoding",
- "serde",
- "static_assertions",
- "unsigned-varint 0.7.1",
- "url",
 ]
 
 [[package]]
@@ -1973,7 +1956,7 @@ dependencies = [
  "ryu",
  "sha1 0.6.1",
  "tokio",
- "tokio-util 0.7.7",
+ "tokio-util",
  "url",
 ]
 
@@ -2020,7 +2003,7 @@ version = "0.11.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21eed90ec8570952d53b772ecf8f206aa1ec9a3d76b2521c56c42973f2d91ee9"
 dependencies = [
- "base64",
+ "base64 0.21.0",
  "bytes",
  "encoding_rs",
  "futures-core",
@@ -2044,7 +2027,7 @@ dependencies = [
  "serde_urlencoded",
  "tokio",
  "tokio-rustls",
- "tokio-util 0.7.7",
+ "tokio-util",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -2126,7 +2109,7 @@ version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d194b56d58803a43635bdc398cd17e383d6f71f9182b9a192c127ca42494a59b"
 dependencies = [
- "base64",
+ "base64 0.21.0",
 ]
 
 [[package]]
@@ -2574,20 +2557,6 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.6.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36943ee01a6d67977dd3f84a5a1d2efeb4ada3a1ae771cadfaa535d9d9fc6507"
-dependencies = [
- "bytes",
- "futures-core",
- "futures-sink",
- "log",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
-name = "tokio-util"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5427d89453009325de0d8f342c9490009f76e999cb7672d77e46267448f7e6b2"
@@ -2714,12 +2683,6 @@ name = "unicode-xid"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f962df74c8c05a667b5ee8bcf162993134c104e96440b663c8daa176dc772d8c"
-
-[[package]]
-name = "unsigned-varint"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7fdeedbf205afadfe39ae559b75c3240f24e257d0ca27e85f85cb82aa19ac35"
 
 [[package]]
 name = "unsigned-varint"
