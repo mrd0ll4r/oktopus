@@ -105,7 +105,7 @@ services:
       - ./redis.conf:/usr/local/etc/redis/redis.conf
 
   rabbitmq:
-    image: "rabbitmq:3.10"
+    image: "rabbitmq:3.12"
     restart: unless-stopped
     hostname: rmq
     expose:
@@ -131,7 +131,7 @@ services:
     image: "ipfs-indexer-cid-worker:latest"
 
   daemon01:
-    image: "ipfs/kubo:v0.18.1"
+    image: "ipfs/kubo:v0.22.0"
     command: daemon --migrate=true --agent-version-suffix=docker --enable-gc
     restart: unless-stopped
     volumes:
@@ -145,7 +145,7 @@ services:
       - "127.0.0.1:5001:5001"
 
   daemon02:
-    image: "ipfs/kubo:v0.18.1"
+    image: "ipfs/kubo:v0.22.0"
     command: daemon --migrate=true --agent-version-suffix=docker --enable-gc
     restart: unless-stopped
     volumes:
@@ -238,7 +238,7 @@ services:
 
   prometheus:
     # https://hub.docker.com/r/prom/prometheus/tags
-    image: prom/prometheus:v2.39.0
+    image: prom/prometheus:latest
     restart: unless-stopped
     expose:
       - 9090
@@ -258,7 +258,7 @@ services:
     expose:
       - 9100
     # https://hub.docker.com/r/prom/node-exporter/tags
-    image: prom/node-exporter:v1.4.0
+    image: prom/node-exporter:latest
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
