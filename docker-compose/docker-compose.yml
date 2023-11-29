@@ -198,9 +198,12 @@ services:
       - "http://daemon01:5001"
       - "--gateway"
       - "http://daemon01:8080"
+      # Optionally, to keep downloaded files:
+      #- "--keep"
     volumes:
       - ./.env:/ipfs-indexer/.env
       - ./worker_01_temp_file_storage:/ipfs-indexer/tmp
+      - ./worker_01_successful_downloads:/ipfs-indexer/downloads
 
   file_worker_daemon02:
     <<: *daemon02_worker
@@ -211,9 +214,12 @@ services:
       - "http://daemon02:5001"
       - "--gateway"
       - "http://daemon02:8080"
+      # Optionally, to keep downloaded files:
+      #- "--keep"
     volumes:
       - ./.env:/ipfs-indexer/.env
       - ./worker_02_temp_file_storage:/ipfs-indexer/tmp
+      - ./worker_02_successful_downloads:/ipfs-indexer/downloads
 
   grafana:
     # https://hub.docker.com/r/grafana/grafana/tags
