@@ -21,6 +21,10 @@ RUN apt-get update && apt-get install -y \
 RUN mkdir -p /ipfs-indexer/tmp \
     && chown ipfs:ipfs /ipfs-indexer/tmp
 
+# Create directory for downloaded files.
+RUN mkdir -p /ipfs-indexer/downloads \
+    && chown ipfs:ipfs /ipfs-indexer/downloads
+
 # Enter our working directory.
 WORKDIR ipfs-indexer
 

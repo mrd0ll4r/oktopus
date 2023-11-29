@@ -15,6 +15,7 @@ thiserror = "1.0.31"
 chrono = "0.4.19"
 lazy_static = "1.4.0"
 dotenvy = "0.15"
+hex = "0.4"
 
 ## Database stuff
 diesel = { version = "2.0.0", features = ["postgres", "chrono"] }

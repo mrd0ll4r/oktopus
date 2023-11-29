@@ -38,6 +38,7 @@ Static configuration is taken from a .env file, see the README for more informat
             .default_value("http://127.0.0.1:5001"))
         .arg(arg!(--gateway <ADDRESS> "specifies the gateway URL of the IPFS daemon to use")
             .default_value("http://127.0.0.1:8080"))
+        .arg(arg!(--keep "moves completely downloaded files to a directory for later use").action(clap::ArgAction::SetTrue))
         .get_matches();
 
     let failure_threshold = ipfs_indexer::failed_file_downloads_threshold_from_env()
@@ -51,7 +52,8 @@ Static configuration is taken from a .env file, see the README for more informat
     let temp_storage_path = Path::new("/ipfs-indexer/tmp");
     ensure!(
         temp_storage_path.is_dir(),
-        "temporary file storage directory missing"
+        "temporary file storage directory {:?} missing or not a directory",
+        temp_storage_path
     );
 
     // Test if we can write to it
@@ -82,6 +84,34 @@ Static configuration is taken from a .env file, see the README for more informat
         }
     }
     let temp_storage_path = Arc::new(temp_storage_path.to_path_buf());
+
+    // Create completed download storage directory, if required
+    let final_storage_path = Path::new("/ipfs-indexer/downloads");
+    ensure!(
+        final_storage_path.is_dir(),
+        "completed downloads storage directory {:?} missing or not a directory",
+        final_storage_path
+    );
+
+    // Test if we can write to it
+    debug!(
+        "checking if we can write to completed download storage at {:?}...",
+        final_storage_path
+    );
+    let mut tmp_file_path = final_storage_path.to_path_buf();
+    tmp_file_path.push("test.foo");
+    std::fs::File::create(&tmp_file_path)
+        .context("unable to write to completed download storage directory")?;
+    std::fs::remove_file(&tmp_file_path)
+        .context("unable to write to completed download storage directory")?;
+
+    // Only enable storing downloaded files if the user requested it.
+    let completed_downloads_path = if *matches.get_one::<bool>("keep").expect("missing keep flag") {
+        info!("will keep downloaded files in {:?}", final_storage_path);
+        Some(Arc::new(final_storage_path.to_path_buf()))
+    } else {
+        None
+    };
 
     let daemon_uri = matches
         .get_one::<String>("daemon")
@@ -200,6 +230,7 @@ Static configuration is taken from a .env file, see the README for more informat
         let temp_storage_path = temp_storage_path.clone();
         let currently_running_tasks = currently_running_tasks.clone();
         let timeouts = timeouts.clone();
+        let completed_downloads_path = completed_downloads_path.clone();
 
         tokio::spawn(async move {
             handle_delivery(
@@ -217,6 +248,7 @@ Static configuration is taken from a .env file, see the README for more informat
                 file_size_limit,
                 temp_storage_path,
                 timeouts,
+                completed_downloads_path,
             )
             .await
         });
@@ -240,6 +272,7 @@ async fn handle_delivery<S, T>(
     file_size_limit: u64,
     temp_file_dir: Arc<PathBuf>,
     timeouts: Arc<Timeouts>,
+    completed_downloads_dir: Option<Arc<PathBuf>>,
 ) where
     S: IpfsApi + Sync,
     T: IpfsApi + Sync,
@@ -294,6 +327,7 @@ async fn handle_delivery<S, T>(
         file_size_limit,
         temp_file_dir,
         timeouts,
+        completed_downloads_dir,
     )
     .await;
 
@@ -411,6 +445,7 @@ async fn handle_file<S, T>(
     file_size_limit: u64,
     temp_file_dir: Arc<PathBuf>,
     timeouts: Arc<Timeouts>,
+    completed_downloads_dir: Option<Arc<PathBuf>>,
 ) -> TaskOutcome
 where
     S: IpfsApi + Sync,
@@ -502,6 +537,7 @@ where
         cid_parts,
         &cid,
         timeouts,
+        completed_downloads_dir,
     )
     .await
     {
@@ -626,6 +662,7 @@ async fn download_file<S, T>(
     cid_parts: CIDParts,
     cid: &String,
     timeouts: Arc<Timeouts>,
+    completed_downloads_dir: Option<Arc<PathBuf>>,
 ) -> Result<Result<FileMetadataFull, SkipReason>, FailureReason>
 where
     S: IpfsApi + Sync,
@@ -647,6 +684,40 @@ where
         timeouts.clone(),
     )
     .await;
+
+    // Move successful downloads, if requested
+    if let Some(completed_downloads_dir) = completed_downloads_dir {
+        if let Ok(res) = file_metadata_res.as_ref() {
+            if let Ok(metadata) = res.as_ref() {
+                // Download was successful and not skipped or something else.
+                // The file should be there, so we should be able to move it.
+
+                let target_path = {
+                    let mut target_path = completed_downloads_dir.to_path_buf();
+                    target_path.push(format!("{}", hex::encode(&metadata.sha256_hash)));
+                    target_path
+                };
+
+                debug!(
+                    "{}: moving successfully downloaded file from {:?} to {:?}",
+                    cid, file_path, target_path
+                );
+
+                // Check if target file already exists and warn about that
+                if target_path.is_file() {
+                    warn!("{}: moving file after successful download, but target already exists at {:?}",cid,target_path)
+                }
+
+                if let Err(err) = std::fs::copy(&file_path, target_path) {
+                    warn!(
+                        "{}: unable to copy file after successful download: {:?}",
+                        cid, err
+                    )
+                }
+            }
+        }
+    }
+
     // Make sure to remove the file again
     let _ = std::fs::remove_file(&file_path).map_err(|err| {
         if let std::io::ErrorKind::NotFound = err.kind() {

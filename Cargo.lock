@@ -1229,6 +1229,7 @@ dependencies = [
  "dotenvy",
  "flexi_logger",
  "futures-util",
+ "hex",
  "http",
  "hyper",
  "ipfs-api-backend-hyper",
