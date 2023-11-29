@@ -74,6 +74,9 @@ The first API calls for the tasks are:
 Each worker needs to know which IPFS daemon to use.
 This is configured via `--daemon <API URL>`, e.g., `--daemon http://127.0.0.1:5001`.
 
+The file worker additionally accepts a `--keep` flag, which instructs it to keep downloaded files.
+See the docker compose setup for examples of where these are kept.
+
 ## Building
 
 Use `build-in-docker.sh` to compile binaries and worker images within Docker.
@@ -290,12 +293,6 @@ They log to stderr on info level by default, which can be overridden via `RUST_L
 
 - We only deal with `dag-pb` and `raw` codecs, as these encode filesystem things.
 - Of those, we only handle UnixFS `File`, `Directory`, and `HAMTShard` blocks. We ignore `Metadata`, `Symlink`, etc.
-- The file worker has to hold the entire file data, twice, in memory for some time.
-  Maybe, in the future, with better plumbing we'll get around this.
-
-## TODO
-
-- Refactor stuff to be nice
 
 ## License
 
