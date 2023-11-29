@@ -1,3 +1,3 @@
 #!/bin/bash
 
-psql -U ipfs_indexer -h 127.0.0.1 -p 5433
+docker compose exec -u postgres db psql -d ipfs_indexer
