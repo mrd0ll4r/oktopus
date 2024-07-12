@@ -482,10 +482,10 @@ where
     {
         CacheCheckResult::RedisMarkedDone => return Skipped(SkipReason::RedisCached),
         CacheCheckResult::RedisFailuresAboveThreshold => {
-            return Skipped(SkipReason::RedisFailureCached)
+            return Skipped(SkipReason::RedisFailureCached);
         }
         CacheCheckResult::DbFailuresAboveThreshold => {
-            return Skipped(SkipReason::DbFailureThreshold)
+            return Skipped(SkipReason::DbFailureThreshold);
         }
         CacheCheckResult::RedeliveredWithoutDbFailures => {
             // TODO record failure in DB
@@ -692,27 +692,61 @@ where
                 // Download was successful and not skipped or something else.
                 // The file should be there, so we should be able to move it.
 
-                let target_path = {
-                    let mut target_path = completed_downloads_dir.to_path_buf();
-                    target_path.push(format!("{}", hex::encode(&metadata.sha256_hash)));
-                    target_path
+                let target_dir = {
+                    let mut target_dir = completed_downloads_dir.to_path_buf();
+
+                    // We split the SHA256 hash into a few parts and create subdirectories based on
+                    // the first two bytes.
+                    let sha256_hash = hex::encode(&metadata.sha256_hash);
+                    let b1 = sha256_hash[0..2].to_string();
+                    let b2 = sha256_hash[2..4].to_string();
+
+                    target_dir.push(b1);
+                    target_dir.push(b2);
+
+                    target_dir
                 };
 
-                debug!(
-                    "{}: moving successfully downloaded file from {:?} to {:?}",
-                    cid, file_path, target_path
-                );
-
-                // Check if target file already exists and warn about that
-                if target_path.is_file() {
-                    warn!("{}: moving file after successful download, but target already exists at {:?}",cid,target_path)
-                }
-
-                if let Err(err) = std::fs::copy(&file_path, target_path) {
+                if let Err(err) = std::fs::create_dir_all(&target_dir) {
                     warn!(
-                        "{}: unable to copy file after successful download: {:?}",
+                        "{}: unable to create directory for downloaded file: {:?}",
                         cid, err
                     )
+                } else {
+                    let (target_path, target_temp_path) = {
+                        let mut target_path = target_dir;
+
+                        target_path.push(format!("{}", hex::encode(&metadata.sha256_hash)));
+
+                        let mut target_temp_path = target_path.clone();
+                        target_temp_path.set_extension("tmp");
+
+                        (target_path, target_temp_path)
+                    };
+
+                    debug!(
+                        "{}: moving successfully downloaded file from {:?} via {:?} to {:?}",
+                        cid, file_path, target_temp_path, target_path
+                    );
+
+                    // Check if target file already exists and warn about that
+                    if target_path.is_file() {
+                        warn!("{}: moving file after successful download, but target already exists at {:?}",cid,target_path)
+                    }
+
+                    if let Err(err) = std::fs::copy(&file_path, &target_temp_path) {
+                        warn!(
+                            "{}: unable to copy file after successful download: {:?}",
+                            cid, err
+                        )
+                    } else {
+                        if let Err(err) = std::fs::rename(target_temp_path, target_path) {
+                            warn!(
+                                "{}: unable to move temp file after successful download: {:?}",
+                                cid, err
+                            )
+                        }
+                    }
                 }
             }
         }

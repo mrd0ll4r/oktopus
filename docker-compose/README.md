@@ -9,7 +9,7 @@ Most of these are mapped to named volumes by default, which is fine in most case
 
 The file worker furthermore uses a volume for temporary storage of files while they are being downloaded, and for completed downloads.
 These are mapped to corresponding directories in the working directory by default.
-This is annoying w.r.t. file permissions, but they are world-readable, at least...
+See the `INDEXER_FILE_STORAGE_UID` and `$INDEXER_FILE_STORAGE_GID` variables in [.env](.env) to set ownership for these directories and files.
 
 ### Useful Scripts
 

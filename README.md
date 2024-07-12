@@ -18,8 +18,8 @@ The database stuff is managed using [diesel](https://diesel.rs).
 Check out [migrations/](migrations) for schema migrations.
 The database _should_ be set up automatically through running the indexer, and kept up to date the same way.
 
-You'll need a MIME database on the system running the file indexer.
-On Ubuntu this is provided via the `shared-mime-info` package.
+You'll need the freedesktop and libmagic MIME databases on the system running the file indexer.
+On Ubuntu this is provided via the `shared-mime-info` and `libmagic1` packages.
 
 You'll need a `.env` file containing global information, and potentially configuration for the workers, read below.
 
@@ -69,10 +69,18 @@ The first API calls for the tasks are:
 - for files: `cat`, which downloads the entire DAG of the file.
 - for HAMTShards: `ls --fast`, which downloads the HAMT DAG, excluding the file leaves.
 
+#### File Worker Downloaded Files Permissions
+
+When running in Docker, mounting the directory of downloaded files on the host can lead to annoying permissions.
+The variables `INDEXER_FILE_STORAGE_UID` and `INDEXER_FILE_STORAGE_GID` can be used to control the UID/GID of the files,
+when running in Docker.
+See the docker compose setup for an example of this.
+
 ### Worker Configuration
 
 Each worker needs to know which IPFS daemon to use.
 This is configured via `--daemon <API URL>`, e.g., `--daemon http://127.0.0.1:5001`.
+The file worker needs a gateway URL as well.
 
 The file worker additionally accepts a `--keep` flag, which instructs it to keep downloaded files.
 See the docker compose setup for examples of where these are kept.
