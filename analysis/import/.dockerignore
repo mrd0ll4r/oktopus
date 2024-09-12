@@ -1,0 +1,3 @@
+# Ignore everything.
+# We build the Diesel CLI in this directory, and that doesn't need anything from the host fs.
+*

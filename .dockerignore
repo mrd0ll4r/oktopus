@@ -3,3 +3,4 @@
 /docker-compose/worker_01_*
 /docker-compose/worker_02_*
 *.cids
+/analysis

@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM block_file_metadata

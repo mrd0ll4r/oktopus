@@ -1,0 +1,1 @@
+SELECT m1.name as libmagic_mime_type, m2.name as freedesktop_mime_type, encode(h.digest, 'hex') as sha2_256_hash FROM analysis.block_file_metadata f, analysis.block_file_hashes h, analysis.mime_types m1, analysis.mime_types m2 WHERE f.block_id = h.block_id AND h.hash_type_id = 1 AND m1.id = f.libmagic_mime_type_id AND m2.id = f.freedesktop_mime_type_id

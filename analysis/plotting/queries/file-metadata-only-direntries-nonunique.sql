@@ -1,0 +1,1 @@
+SELECT fm.file_size, m1.name AS libmagic_mime_type, m2.name AS freedesktop_mime_type  FROM directory_entries de, cids c, blocks b, block_file_metadata fm, mime_types m1, mime_types m2 WHERE de.referenced_cid_id = c.id AND c.block_id = b.id AND b.id = fm.block_id AND fm.libmagic_mime_type_id = m1.id AND fm.freedesktop_mime_type_id = m2.id;
