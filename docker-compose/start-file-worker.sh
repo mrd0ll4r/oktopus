@@ -19,7 +19,7 @@ tmpdir="/ipfs-indexer/tmp"
 downloads_dir="/ipfs-indexer/downloads"
 
 if [ "$(id -u)" -eq 0 ]; then
-  echo "Changing user to $user"
+  echo "Changing user to $user_id"
   # ensure temp folder is writable
   su-exec "$user_id" test -w "$tmpdir" || chown -R -- "$user_id:$user_gid" "$tmpdir"
   # ensure downloads folder is writable
