@@ -294,6 +294,10 @@ Additionally, there is a `post-cids` binary which takes CIDs via stdin and posts
 RabbitMQ is the interface between the system running in docker-compose and the host.
 This tool feeds data into the system via that interface.
 
+The `convert-cids-to-base16` tool converts a list of CIDs to the format usually exported from the database.
+This takes line-separated CIDs from stdin and converts them to version 1, base16 formatted variants.
+It also filters out CIDs not examined by the indexer, i.e., limits the output to filesystem-related CIDs.
+
 All tools are written in Rust.
 They log to stderr on info level by default, which can be overridden via `RUST_LOG=<level>`
 
