@@ -1,3 +1,4 @@
+use crate::hash::AlternativeCids;
 use crate::models::BlockLink;
 use crate::{models, CIDParts};
 use anyhow::Context;
@@ -9,6 +10,7 @@ use lapin::types::FieldTable;
 use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, Consumer};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::path::PathBuf;
 use strum::EnumIter;
 use strum::IntoEnumIterator;
 
@@ -40,6 +42,7 @@ pub enum Queues {
     Files,
     Directories,
     HAMTShards,
+    FinishedFiles,
 }
 
 impl Queues {
@@ -50,6 +53,7 @@ impl Queues {
             Queues::Files => "files",
             Queues::Directories => "directories",
             Queues::HAMTShards => "hamtshards",
+            Queues::FinishedFiles => "finished_files",
         }
     }
 
@@ -62,6 +66,7 @@ impl Queues {
             Queues::Files => "INDEXER_FILE_WORKER_CONCURRENCY",
             Queues::Directories => "INDEXER_DIRECTORY_WORKER_CONCURRENCY",
             Queues::HAMTShards => "INDEXER_HAMTSHARD_WORKER_CONCURRENCY",
+            Queues::FinishedFiles => panic!("no QoS for finished files"),
         };
 
         let num_workers = env::var(key)
@@ -218,6 +223,34 @@ pub async fn post_hamtshard(c: &Channel, msg: &HamtShardMessage) -> anyhow::Resu
 }
 
 pub fn decode_hamtshard(payload: &[u8]) -> anyhow::Result<HamtShardMessage> {
+    let res = serde_json::from_slice(payload)?;
+    Ok(res)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinishedFileMessage {
+    pub root_cid: String,
+    pub cid: CIDParts,
+    pub download_finished_ts: chrono::DateTime<chrono::Utc>,
+    pub file_size: i64,
+    pub freedesktop_mime_type: String,
+    pub libmime_mime_type: String,
+    pub sha256_hash: Vec<u8>,
+    pub alternative_cids: AlternativeCids,
+    pub storage_path: Option<PathBuf>,
+    pub daemon_name: String,
+}
+
+pub async fn post_finished_file(
+    c: &Channel,
+    msg: &FinishedFileMessage,
+) -> anyhow::Result<Confirmation> {
+    let payload = serde_json::to_vec(&msg)?;
+    let res = Queues::FinishedFiles.post_task(c, &payload).await?;
+    Ok(res)
+}
+
+pub fn decode_finished_file(payload: &[u8]) -> anyhow::Result<FinishedFileMessage> {
     let res = serde_json::from_slice(payload)?;
     Ok(res)
 }

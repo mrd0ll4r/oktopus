@@ -200,6 +200,8 @@ services:
       - "http://daemon01:8080"
       # Optionally, to keep downloaded files:
       #- "--keep"
+      # Optionally, to enable download notifications via RabbitMQ
+      #- "--notify"
     volumes:
       - ./.env:/ipfs-indexer/.env
       - ./worker_01_temp_file_storage:/ipfs-indexer/tmp
@@ -216,6 +218,8 @@ services:
       - "http://daemon02:8080"
       # Optionally, to keep downloaded files:
       #- "--keep"
+      # Optionally, to enable download notifications via RabbitMQ
+      #- "--notify"
     volumes:
       - ./.env:/ipfs-indexer/.env
       - ./worker_02_temp_file_storage:/ipfs-indexer/tmp

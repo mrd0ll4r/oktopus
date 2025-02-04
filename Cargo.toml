@@ -12,7 +12,7 @@ futures-util = "0.3.21"
 http = "0.2.8"
 hyper = "0.14"
 thiserror = "1.0.31"
-chrono = "0.4.19"
+chrono = { version = "0.4.19" , features = ["serde"]}
 lazy_static = "1.4.0"
 dotenvy = "0.15"
 hex = "0.4"

@@ -84,6 +84,9 @@ The file worker needs a gateway URL as well.
 
 The file worker additionally accepts a `--keep` flag, which instructs it to keep downloaded files.
 See the docker compose setup for examples of where these are kept.
+It also takes a `--notify` flag which enables the notification mechanism.
+Note that this uses a durable exchange to store notifications in RabbitMQ for a consumer to pick up.
+If you enable `--notify`, **you must pick up the notifications** or RabbitMQ storage will grow.
 
 ## Building
 

@@ -2,6 +2,7 @@ use crate::{models, IpfsApi};
 use anyhow::{anyhow, Context};
 use cid::Cid;
 use log::debug;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::str::FromStr;
@@ -36,7 +37,7 @@ pub async fn compute_sha256(file_path: &Path, file_size: u64) -> anyhow::Result<
     Ok(hasher.finalize().into_iter().collect())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlternativeCids {
     pub sha1: String,
     pub sha2_256: String,

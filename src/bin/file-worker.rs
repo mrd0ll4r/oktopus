@@ -5,10 +5,10 @@ use diesel::PgConnection;
 use futures_util::StreamExt;
 use ipfs_api_backend_hyper::{IpfsApi, TryFromUri};
 use ipfs_indexer::cache::MimeTypeCache;
-use ipfs_indexer::hash::NormalizedAlternativeCid;
+use ipfs_indexer::hash::{AlternativeCids, NormalizedAlternativeCid};
 use ipfs_indexer::ipfs::{BlockLevelMetadata, ParseReferencedCidFailed};
 use ipfs_indexer::prom::OutcomeLabel;
-use ipfs_indexer::queue::FileMessage;
+use ipfs_indexer::queue::{FileMessage, FinishedFileMessage};
 use ipfs_indexer::redis::RedisConnection;
 use ipfs_indexer::{
     db, hash, ipfs, logging, prom, queue, redis, CIDParts, CacheCheckResult, IpfsApiClient,
@@ -18,6 +18,7 @@ use lapin::message::Delivery;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
 use log::{debug, error, info, warn};
 use reqwest::{Client, Url};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -39,6 +40,7 @@ Static configuration is taken from a .env file, see the README for more informat
         .arg(arg!(--gateway <ADDRESS> "specifies the gateway URL of the IPFS daemon to use")
             .default_value("http://127.0.0.1:8080"))
         .arg(arg!(--keep "moves completely downloaded files to a directory for later use").action(clap::ArgAction::SetTrue))
+        .arg(arg!(--notify "post notifications about finished downloads").action(clap::ArgAction::SetTrue))
         .get_matches();
 
     let failure_threshold = ipfs_indexer::failed_file_downloads_threshold_from_env()
@@ -112,6 +114,11 @@ Static configuration is taken from a .env file, see the README for more informat
     } else {
         None
     };
+
+    // Should we notify?
+    let do_notify = *matches
+        .get_one::<bool>("notify")
+        .expect("missing notify flag");
 
     let daemon_uri = matches
         .get_one::<String>("daemon")
@@ -197,6 +204,12 @@ Static configuration is taken from a .env file, see the README for more informat
         .create_channel()
         .await
         .context("unable to create RabbitMQ channel")?;
+    let finished_files_chan = Arc::new(
+        rabbitmq_conn
+            .create_channel()
+            .await
+            .context("unable to create RabbitMQ channel")?,
+    );
     queue::set_prefetch(
         &files_chan,
         queue::Queues::Files
@@ -222,6 +235,8 @@ Static configuration is taken from a .env file, see the README for more informat
         let redis_conn = redis_conn.clone();
         let daemon_uri = daemon_uri.clone();
         let db_conn = db_conn.clone();
+        let finished_files_chan = finished_files_chan.clone();
+        let do_notify = do_notify;
         let mime_cache = mime_cache.clone();
         let ipfs_api_download_client = ipfs_api_download_client.clone();
         let ipfs_api_upload_client = ipfs_api_upload_client.clone();
@@ -239,6 +254,8 @@ Static configuration is taken from a .env file, see the README for more informat
                 daemon_uri,
                 redis_conn,
                 db_conn,
+                finished_files_chan,
+                do_notify,
                 mime_cache,
                 ipfs_api_download_client,
                 ipfs_api_upload_client,
@@ -263,6 +280,8 @@ async fn handle_delivery<S, T>(
     daemon_uri: Arc<String>,
     mut redis_conn: RedisConnection,
     db_conn: Arc<Mutex<PgConnection>>,
+    finished_files_chan: Arc<lapin::Channel>,
+    do_notify: bool,
     mime_cache: Arc<Mutex<MimeTypeCache>>,
     ipfs_api_download_client: Arc<T>,
     ipfs_api_upload_client: Arc<S>,
@@ -314,7 +333,7 @@ async fn handle_delivery<S, T>(
     let before = Instant::now();
     let outcome = handle_file(
         delivery_tag,
-        msg,
+        msg.clone(),
         redelivered,
         &mut redis_conn,
         db_conn,
@@ -323,7 +342,7 @@ async fn handle_delivery<S, T>(
         ipfs_api_upload_client,
         failure_threshold,
         gateway_client,
-        gateway_base_url,
+        gateway_base_url.clone(),
         file_size_limit,
         temp_file_dir,
         timeouts,
@@ -334,7 +353,7 @@ async fn handle_delivery<S, T>(
     // Record in prometheus
     prom::record_task_duration(
         &*prom::FILE_TASK_STATUS,
-        outcome,
+        &outcome,
         before.elapsed(),
         &daemon_uri,
     );
@@ -346,8 +365,8 @@ async fn handle_delivery<S, T>(
     }
 
     // Report to RabbitMQ
-    match outcome {
-        Skipped(_) | Done => {
+    match &outcome {
+        Skipped(_) | Done(_) => {
             acker
                 .ack(BasicAckOptions::default())
                 .await
@@ -361,6 +380,35 @@ async fn handle_delivery<S, T>(
                 })
                 .await
                 .expect("unable to NACK delivery");
+        }
+    }
+
+    // If we have notifications enabled
+    if do_notify {
+        if let Done(metadata) = outcome {
+            // Notify
+            debug!("{}: posting finished file notification...", cid);
+            let confirmation = queue::post_finished_file(
+                &finished_files_chan,
+                &FinishedFileMessage {
+                    root_cid: msg.root_cid,
+                    cid: msg.cid,
+                    download_finished_ts: metadata.download_finished_ts,
+                    file_size: metadata.file_size,
+                    freedesktop_mime_type: metadata.freedesktop_mime_type,
+                    libmime_mime_type: metadata.libmime_mime_type,
+                    sha256_hash: metadata.sha256_hash,
+                    alternative_cids: metadata.alternative_cids,
+                    storage_path: metadata.storage_path,
+                    daemon_name: gateway_base_url.host_str().unwrap().to_string(),
+                },
+            )
+            .await
+            .expect("unable to post finished file");
+            debug!(
+                "{}: posted finished file, got confirmation {:?}",
+                cid, confirmation
+            );
         }
     }
 }
@@ -385,18 +433,29 @@ enum FailureReason {
     FailedToDetectLibmagicMimeType,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Serialize)]
+struct TaskDoneMetadata {
+    download_finished_ts: chrono::DateTime<chrono::Utc>,
+    file_size: i64,
+    freedesktop_mime_type: String,
+    libmime_mime_type: String,
+    sha256_hash: Vec<u8>,
+    alternative_cids: AlternativeCids,
+    storage_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
 enum TaskOutcome {
     Skipped(SkipReason),
-    Done,
+    Done(TaskDoneMetadata),
     Failed(FailureReason),
 }
 
-impl OutcomeLabel for TaskOutcome {
+impl OutcomeLabel for &TaskOutcome {
     fn status(&self) -> &'static str {
         match self {
             Skipped(_) => "skipped",
-            Done => "done",
+            Done(_) => "done",
             Failed(_) => "failed",
         }
     }
@@ -412,7 +471,7 @@ impl OutcomeLabel for TaskOutcome {
                 SkipReason::RedeliveredWithoutDbFailure => "redelivered_without_db_failure",
                 SkipReason::DbDone => "db_done",
             },
-            Done => "done",
+            Done(_) => "done",
             Failed(reason) => match reason {
                 FailureReason::DownloadFailed => "download_failed",
                 FailureReason::FailedToComputeAlternativeCids => {
@@ -520,10 +579,12 @@ where
         head_finished_ts,
         download_finished_ts,
         end_ts,
+        storage_path,
         freedesktop_mime_type,
         libmime_mime_type,
         file_size,
         sha256_hash,
+        alternative_cids,
         alternative_cids_normalized,
         layers,
         dag_block_cids,
@@ -546,6 +607,7 @@ where
             Ok(metadata) => {
                 let FileMetadataFull {
                     file_metadata,
+                    storage_path,
                     layers,
                     dag_block_cids,
                 } = metadata;
@@ -558,6 +620,7 @@ where
                     libmime_mime_type,
                     file_size,
                     sha256_hash,
+                    alternative_cids,
                     alternative_cids_normalized,
                 } = file_metadata;
                 (
@@ -565,10 +628,12 @@ where
                     head_finished_ts,
                     download_finished_ts,
                     end_ts,
+                    storage_path,
                     freedesktop_mime_type,
                     libmime_mime_type,
                     file_size,
                     sha256_hash,
+                    alternative_cids,
                     alternative_cids_normalized,
                     layers,
                     dag_block_cids,
@@ -595,15 +660,15 @@ where
         mime_cache,
         db_block.id,
         freedesktop_mime_type,
-        libmime_mime_type,
+        libmime_mime_type.clone(),
         file_size,
-        sha256_hash,
+        sha256_hash.clone(),
         alternative_cids_normalized,
         layers,
         end_ts,
         start_ts,
         head_finished_ts,
-        download_finished_ts,
+        download_finished_ts.clone(),
     )
     .await
     .expect("unable to upsert file metadata into database");
@@ -624,11 +689,20 @@ where
     debug!("{}: marking done in redis...", cid);
     redis_mark_done(&cid, redis_conn).await;
 
-    Done
+    Done(TaskDoneMetadata {
+        download_finished_ts,
+        file_size,
+        freedesktop_mime_type: freedesktop_mime_type.to_string(),
+        libmime_mime_type,
+        sha256_hash,
+        alternative_cids,
+        storage_path,
+    })
 }
 
 struct FileMetadataFull {
     file_metadata: FileMetadata,
+    storage_path: Option<PathBuf>,
     layers: Vec<
         Vec<(
             CIDParts,
@@ -649,6 +723,7 @@ struct FileMetadata {
     libmime_mime_type: String,
     file_size: i64,
     sha256_hash: Vec<u8>,
+    alternative_cids: AlternativeCids,
     alternative_cids_normalized: Vec<NormalizedAlternativeCid>,
 }
 
@@ -687,7 +762,7 @@ where
     .await;
 
     // Move successful downloads, if requested
-    if let Some(completed_downloads_dir) = completed_downloads_dir {
+    let storage_path = if let Some(completed_downloads_dir) = completed_downloads_dir {
         if let Ok(res) = file_metadata_res.as_ref() {
             if let Ok(metadata) = res.as_ref() {
                 // Download was successful and not skipped or something else.
@@ -712,7 +787,8 @@ where
                     warn!(
                         "{}: unable to create directory for downloaded file: {:?}",
                         cid, err
-                    )
+                    );
+                    None
                 } else {
                     let (target_path, target_temp_path) = {
                         let mut target_path = target_dir;
@@ -739,19 +815,32 @@ where
                         warn!(
                             "{}: unable to copy file after successful download: {:?}",
                             cid, err
-                        )
+                        );
+                        None
                     } else {
-                        if let Err(err) = std::fs::rename(target_temp_path, target_path) {
+                        if let Err(err) = std::fs::rename(target_temp_path, &target_path) {
                             warn!(
                                 "{}: unable to move temp file after successful download: {:?}",
                                 cid, err
-                            )
+                            );
+                            None
+                        } else {
+                            let rel_path = target_path
+                                .strip_prefix(&completed_downloads_dir.to_path_buf())
+                                .expect("strip prefix failed");
+                            Some(rel_path.to_path_buf())
                         }
                     }
                 }
+            } else {
+                None
             }
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
     // Make sure to remove the file again
     let _ = std::fs::remove_file(&file_path).map_err(|err| {
@@ -803,6 +892,7 @@ where
 
     Ok(Ok(FileMetadataFull {
         file_metadata,
+        storage_path,
         layers,
         dag_block_cids,
     }))
@@ -931,6 +1021,7 @@ where
         libmime_mime_type: libmagic_mime_type,
         file_size: file_size as i64,
         sha256_hash,
+        alternative_cids,
         alternative_cids_normalized,
     }))
 }
