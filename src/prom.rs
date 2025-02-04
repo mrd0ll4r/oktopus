@@ -26,6 +26,8 @@ lazy_static! {
     .unwrap();
     pub static ref CID_TASK_STATUS: HistogramVec =
         register_histogram_vec!("cid_task_status", "TODO", &["status", "reason"]).unwrap();
+    pub static ref NOTIFICATION_TASK_STATUS: HistogramVec =
+        register_histogram_vec!("notification_task_status", "TODO", &["status", "reason"]).unwrap();
     pub static ref DB_METHOD_CALL_DURATIONS: HistogramVec =
         register_histogram_vec!("db_method_call_durations", "TODO", &["method"]).unwrap();
     pub static ref IPFS_METHOD_CALL_DURATIONS: HistogramVec =

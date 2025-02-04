@@ -18,6 +18,7 @@ docker cp extract:/ipfs-indexer/target/release/file-worker ./out/
 docker cp extract:/ipfs-indexer/target/release/directory-worker ./out/
 docker cp extract:/ipfs-indexer/target/release/hamtshard-worker ./out/
 docker cp extract:/ipfs-indexer/target/release/convert-cids-to-base16 ./out/
+docker cp extract:/ipfs-indexer/target/release/notifier ./out/
 
 docker rm extract
 

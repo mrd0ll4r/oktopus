@@ -1,0 +1,7 @@
+rabbitmq_uri: "amqp://127.0.0.1:5672/%2f"
+endpoint: "http://localhost:8080"
+daemons:
+  - host: "daemon01"
+    downloads_root_dir: "./docker-compose/worker_01_successful_downloads"
+  - host: "daemon02"
+    downloads_root_dir: "./docker-compose/worker_02_successful_downloads"
