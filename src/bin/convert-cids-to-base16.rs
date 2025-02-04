@@ -1,8 +1,8 @@
-use anyhow::{Context, Error};
+use anyhow::Context;
 use cid::multibase::Base::Base16Lower;
 use clap::Command;
-use ipfs_indexer::{logging, queue};
-use log::{debug, error, info};
+use ipfs_indexer::logging;
+use log::{debug, error};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[tokio::main]
