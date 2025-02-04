@@ -31,7 +31,7 @@ pub mod queue;
 pub mod redis;
 pub mod schema;
 
-pub type IpfsApiClient = IpfsClient<hyper::client::connect::HttpConnector>;
+pub type IpfsApiClient = IpfsClient;
 
 // Include the `unixfs` module, which is generated from unixfs.proto.
 pub mod unixfs {
