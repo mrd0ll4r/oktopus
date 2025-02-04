@@ -282,6 +282,7 @@ where
     T: IpfsApi + Sync,
 {
     let BlockMessage {
+        root_cid,
         cid: cid_parts,
         db_block,
     } = msg;
@@ -407,6 +408,7 @@ where
             queue::post_file(
                 &files_chan,
                 &FileMessage {
+                    root_cid,
                     cid: cid_parts,
                     db_block,
                     db_links: links,
@@ -419,6 +421,7 @@ where
             queue::post_directory(
                 &directories_chan,
                 &DirectoryMessage {
+                    root_cid,
                     cid: cid_parts,
                     db_block,
                     db_links: links,
@@ -431,6 +434,7 @@ where
             queue::post_hamtshard(
                 &hamtshards_chan,
                 &HamtShardMessage {
+                    root_cid,
                     cid: cid_parts,
                     db_block,
                 },

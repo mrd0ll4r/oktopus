@@ -192,6 +192,7 @@ async fn handle_cid(
     let confirmation = queue::post_block(
         blocks_chan,
         &BlockMessage {
+            root_cid: cid.clone(),
             cid: cid_parts,
             db_block,
         },

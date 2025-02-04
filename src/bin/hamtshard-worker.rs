@@ -256,6 +256,7 @@ where
     T: IpfsApi + Sync,
 {
     let HamtShardMessage {
+        root_cid,
         cid: cid_parts,
         db_block,
     } = msg;
@@ -369,6 +370,7 @@ where
         let confirmation = queue::post_block(
             &blocks_chan,
             &BlockMessage {
+                root_cid: root_cid.clone(),
                 cid: cidparts,
                 db_block: block,
             },

@@ -300,6 +300,7 @@ where
     T: IpfsApi + Sync,
 {
     let DirectoryMessage {
+        root_cid,
         cid: cid_parts,
         db_block,
         db_links,
@@ -383,6 +384,7 @@ where
             let confirmation = queue::post_block(
                 &blocks_chan,
                 &BlockMessage {
+                    root_cid: root_cid.clone(),
                     cid: cidparts,
                     db_block: block,
                 },
@@ -484,6 +486,7 @@ where
                 queue::post_file(
                     &files_chan,
                     &FileMessage {
+                        root_cid: root_cid.clone(),
                         cid: cidparts,
                         db_block: block,
                         db_links: links,
@@ -496,6 +499,7 @@ where
                 queue::post_directory(
                     &directories_chan,
                     &DirectoryMessage {
+                        root_cid: root_cid.clone(),
                         cid: cidparts,
                         db_block: block,
                         db_links: links,
@@ -508,6 +512,7 @@ where
                 queue::post_hamtshard(
                     &hamtshards_chan,
                     &HamtShardMessage {
+                        root_cid: root_cid.clone(),
                         cid: cidparts,
                         db_block: block,
                     },

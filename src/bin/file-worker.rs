@@ -452,6 +452,7 @@ where
     T: IpfsApi + Sync,
 {
     let FileMessage {
+        root_cid: _,
         cid: cid_parts,
         db_block,
         db_links,

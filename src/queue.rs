@@ -150,6 +150,7 @@ impl Queues {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockMessage {
+    pub root_cid: String,
     pub cid: CIDParts,
     pub db_block: models::Block,
 }
@@ -167,6 +168,7 @@ pub fn decode_block(payload: &[u8]) -> anyhow::Result<BlockMessage> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileMessage {
+    pub root_cid: String,
     pub cid: CIDParts,
     pub db_block: models::Block,
     pub db_links: Vec<BlockLink>,
@@ -185,6 +187,7 @@ pub fn decode_file(payload: &[u8]) -> anyhow::Result<FileMessage> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryMessage {
+    pub root_cid: String,
     pub cid: CIDParts,
     pub db_block: models::Block,
     pub db_links: Vec<BlockLink>,
@@ -203,6 +206,7 @@ pub fn decode_directory(payload: &[u8]) -> anyhow::Result<DirectoryMessage> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HamtShardMessage {
+    pub root_cid: String,
     pub cid: CIDParts,
     pub db_block: models::Block,
 }
