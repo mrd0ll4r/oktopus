@@ -149,7 +149,7 @@ async fn handle_delivery<T>(
     let msg = match queue::decode_hamtshard(&data) {
         Ok(cid) => cid,
         Err(err) => {
-            warn!("unable to parse task DirectoryMessage, skipping: {:?}", err);
+            warn!("unable to parse task HamtShardMessage, skipping: {:?}", err);
             return;
         }
     };
