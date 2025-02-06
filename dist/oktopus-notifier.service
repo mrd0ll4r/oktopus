@@ -1,0 +1,17 @@
+[Unit]
+Description=Oktopus Notifier
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=ipfs
+Group=ipfs
+Type=simple
+Restart=always
+RestartSec=3
+WorkingDirectory=/home/ipfs/leo/projects/ipfs/oktopus/out
+Environment="RUST_LOG=info"
+ExecStart=/home/ipfs/leo/projects/ipfs/oktopus/out/notifier
+
+[Install]
+WantedBy=multi-user.target

@@ -21,6 +21,7 @@ use std::time::Instant;
 struct Config {
     pub rabbitmq_uri: String,
     pub endpoint: String,
+    pub health_endpoint: String,
     pub daemons: Vec<DaemonConfig>,
 }
 
@@ -121,8 +122,12 @@ async fn main() -> anyhow::Result<()> {
     debug!("connecting to notification endpoint...");
     let client = reqwest::Client::new();
     let remote = cfg.endpoint.parse::<Url>().context("invalid endpoint")?;
+    let health_remote = cfg
+        .health_endpoint
+        .parse::<Url>()
+        .context("invalid health endpoint")?;
     client
-        .get(remote.clone())
+        .get(health_remote)
         .send()
         .await
         .context("unable to query endpoint health check")?;
