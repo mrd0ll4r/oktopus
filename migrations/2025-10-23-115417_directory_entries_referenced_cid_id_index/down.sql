@@ -1,0 +1,1 @@
+DROP INDEX directory_entries_referenced_cid_id;

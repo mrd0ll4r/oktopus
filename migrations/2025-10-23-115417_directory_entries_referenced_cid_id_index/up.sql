@@ -1,0 +1,1 @@
+CREATE INDEX directory_entries_referenced_cid_id ON directory_entries (referenced_cid_id);
