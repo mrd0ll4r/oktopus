@@ -16,6 +16,7 @@ chrono = { version = "0.4.19" , features = ["serde"]}
 lazy_static = "1.4.0"
 dotenvy = "0.15"
 hex = "0.4"
+csv = "1.3.1"
 
 ## Database stuff
 diesel = { version = "2.0.0", features = ["postgres", "chrono"] }
@@ -68,6 +69,7 @@ redis = { version = "0.21.6", features = ["tokio-comp"] }
 
 ## CLI parser
 clap = { version = "3.2.22", features = ["cargo"] }
+
 
 [build-dependencies]
 ## Protobuf code generator
