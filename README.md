@@ -1,6 +1,8 @@
 # Oktopus IPFS Metadata Crawler/Indexer
 
-A system to download data off IPFS in parallel, using multiple daemons, and save metadata about it to Postgres.
+A system to download data off IPFS in parallel, using multiple daemons, save metadata about it to Postgres,
+and optionally keep the downloaded files for further analysis,
+notifying other systems about them.
 
 ## Running
 
@@ -9,6 +11,8 @@ For that, you'll need the worker images in your local registry, which is achieve
 Check out [docker-compose/](docker-compose/README.md).
 
 You can then use the `post-cids` tool to post CIDs from stdin to RabbitMQ, which will trigger the indexing of those CIDs.
+The `notifier` tool can be used to notify other services of finished downloads,
+see also the `--notify` option of file workers.
 
 ### Manually
 
@@ -180,6 +184,7 @@ TODO: the message types (i.e., task definitions) are not up-to-date.
   10. (optimization) Insert CID into Redis `files`, `blocks`, and `cids`
   11. (optimization) Insert DAG CIDs into Redis `cids` and `blocks`
   12. ACK to RabbitMQ
+  13. Notify via RabbitMQ, if enabled
 - (optimization) Marginally faster on the daemon that indexed the block, but probably doesn't matter (because the DAG needs to be fetched)
 
 #### Queue `directories`
@@ -234,7 +239,7 @@ TODO: the message types (i.e., task definitions) are not up-to-date.
 #### Postgres
 
 A simple postgres database.
-Schema migrations are handled using diesel, which should happen automatically the first time you launch any of the workers.
+Schema migrations are handled using `diesel`, which should happen automatically the first time you launch any of the workers.
 
 The workers add information to the database in layers.
 This is done in transactions, so we can be certain that a layer, even though it might be composed of multiple records in multiple tables, is inserted atomically.
@@ -300,6 +305,13 @@ This tool feeds data into the system via that interface.
 The `convert-cids-to-base16` tool converts a list of CIDs to the format usually exported from the database.
 This takes line-separated CIDs from stdin and converts them to version 1, base16 formatted variants.
 It also filters out CIDs not examined by the indexer, i.e., limits the output to filesystem-related CIDs.
+
+The `notifier` tool subscribes to RabbitMQ and listens for finished-file-download notifications.
+For each, it pushes information via HTTP to a configured service.
+It also checks if the service is alive.
+
+The `convert-cids-to-all-representations` tool converts input CIDs (from `STDIN`)
+to CSV output (on `STDOUT`) in various possible representations.
 
 All tools are written in Rust.
 They log to stderr on info level by default, which can be overridden via `RUST_LOG=<level>`
