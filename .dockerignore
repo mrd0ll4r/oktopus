@@ -4,3 +4,5 @@
 /docker-compose/worker_02_*
 *.cids
 /analysis
+/docker-compose/*tmp*
+/docker-compose/roots*
