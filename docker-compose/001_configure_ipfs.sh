@@ -9,3 +9,5 @@ ipfs config apply server
 # should decrease load.
 ipfs config Reprovider.Interval 0
 
+# Limit memory a bit
+ipfs config Swarm.ResourceMgr.MaxMemory 6442450944
