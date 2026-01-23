@@ -1,3 +1,3 @@
 #!/bin/bash
 
-docker compose exec -u postgres db psql -d ipfs_indexer
+docker compose exec db psql -U ipfs_indexer -d ipfs_indexer
