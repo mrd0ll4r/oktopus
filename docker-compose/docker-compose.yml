@@ -39,6 +39,11 @@ services:
       - "no_run"
     image: "busybox:latest"
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: '2G'
     expose:
       - 8088
     depends_on:
@@ -134,30 +139,47 @@ services:
     image: "ipfs/kubo:v0.22.0"
     command: daemon --migrate=true --agent-version-suffix=docker --enable-gc
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: '8G'
+    environment:
+      - "GOMEMLIMIT=8GiB"
+      - "GOMAXPROCS=4"
     volumes:
       - ipfs_01_path:/data/ipfs
       - ./001_configure_ipfs.sh:/container-init.d/001_configure_ipfs.sh
+      - ./002_configure_first_daemon_addresses.sh:/container-init.d/002_configure_first_daemon_addresses.sh
     ports:
       # Swarm listens on all interfaces, so is remotely reachable.
-      - "4001:4001/tcp"
-      - "4001:4001/udp"
+      - "4101:4101/tcp"
+      - "4101:4101/udp"
       # API port, which includes admin operations, so you probably don't want this remotely accessible.
-      - "127.0.0.1:5001:5001"
+      - "127.0.0.1:5101:5001"
 
   daemon02:
     image: "ipfs/kubo:v0.22.0"
     command: daemon --migrate=true --agent-version-suffix=docker --enable-gc
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: '8G'
+    environment:
+      - "GOMEMLIMIT=8GiB"
+      - "GOMAXPROCS=4"
     volumes:
       - ipfs_02_path:/data/ipfs
       - ./001_configure_ipfs.sh:/container-init.d/001_configure_ipfs.sh
       - ./002_configure_second_daemon_addresses.sh:/container-init.d/002_configure_second_daemon_addresses.sh
     ports:
       # Swarm listens on all interfaces, so is remotely reachable.
-      - "4002:4002/tcp"
-      - "4002:4002/udp"
+      - "4102:4002/tcp"
+      - "4102:4002/udp"
       # API port, which includes admin operations, so you probably don't want this remotely accessible.
-      - "127.0.0.1:5002:5001"
+      - "127.0.0.1:5102:5001"
 
   block_worker_daemon01:
     <<: *daemon01_worker
@@ -199,9 +221,9 @@ services:
       - "--gateway"
       - "http://daemon01:8080"
       # Optionally, to keep downloaded files:
-      #- "--keep"
+      - "--keep"
       # Optionally, to enable download notifications via RabbitMQ
-      #- "--notify"
+      - "--notify"
     volumes:
       - ./.env:/ipfs-indexer/.env
       - ./worker_01_temp_file_storage:/ipfs-indexer/tmp
@@ -217,9 +239,9 @@ services:
       - "--gateway"
       - "http://daemon02:8080"
       # Optionally, to keep downloaded files:
-      #- "--keep"
+      - "--keep"
       # Optionally, to enable download notifications via RabbitMQ
-      #- "--notify"
+      - "--notify"
     volumes:
       - ./.env:/ipfs-indexer/.env
       - ./worker_02_temp_file_storage:/ipfs-indexer/tmp
