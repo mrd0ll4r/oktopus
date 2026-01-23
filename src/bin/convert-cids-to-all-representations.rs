@@ -26,8 +26,8 @@ async fn main() -> anyhow::Result<()> {
     .version(clap::crate_version!())
     .author("Leo Balduf <leobalduf@gmail.com>")
     .about(
-        "IPFS indexer tool to convert a list of CIDs to CIDv0 (if available), CIDv1 base32, and CIDv1 base16 (database format).\
-            This reads CIDs from stdin and outputs CSV of CIDv1_base32, CIDv1_base16, CIDv0.\
+        "IPFS indexer tool to convert a list of CIDs to CIDv0 (if available), CIDv1 base32, and CIDv1 base16 (database format). \
+            This reads CIDs from stdin and outputs CSV of CIDv1_base32, CIDv1_base16, CIDv0. \
             Non-filesystem codecs are filtered out.",
     )
     .get_matches();
